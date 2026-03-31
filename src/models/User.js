@@ -47,11 +47,34 @@ const userSchema = new mongoose.Schema(
       default: "English (US)",
       trim: true,
     },
+    businessBio: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    experienceLevel: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    serviceCity: {
+      type: String,
+      default: "",
+      trim: true,
+    },
     locationLat: {
       type: Number,
       default: null,
     },
     locationLng: {
+      type: Number,
+      default: null,
+    },
+    serviceLocationLat: {
+      type: Number,
+      default: null,
+    },
+    serviceLocationLng: {
       type: Number,
       default: null,
     },

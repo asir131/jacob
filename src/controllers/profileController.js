@@ -41,7 +41,7 @@ const uploadAvatar = async (req, res, next) => {
       req.user.id,
       { avatar: result.secure_url },
       { new: true }
-    ).select("_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng");
+    ).select("_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng");
 
     if (!updatedUser) {
       return res.status(404).json({
@@ -67,6 +67,13 @@ const uploadAvatar = async (req, res, next) => {
           preferredLanguage: updatedUser.preferredLanguage || "English (US)",
           locationLat: typeof updatedUser.locationLat === "number" ? updatedUser.locationLat : null,
           locationLng: typeof updatedUser.locationLng === "number" ? updatedUser.locationLng : null,
+          businessBio: updatedUser.businessBio || "",
+          experienceLevel: updatedUser.experienceLevel || "",
+          serviceCity: updatedUser.serviceCity || "",
+          serviceLocationLat:
+            typeof updatedUser.serviceLocationLat === "number" ? updatedUser.serviceLocationLat : null,
+          serviceLocationLng:
+            typeof updatedUser.serviceLocationLng === "number" ? updatedUser.serviceLocationLng : null,
         },
       },
     });
@@ -85,6 +92,11 @@ const updateProfile = async (req, res, next) => {
       preferredLanguage,
       locationLat,
       locationLng,
+      businessBio,
+      experienceLevel,
+      serviceCity,
+      serviceLocationLat,
+      serviceLocationLng,
     } = req.body;
 
     const updates = {};
@@ -98,6 +110,15 @@ const updateProfile = async (req, res, next) => {
     }
     if (locationLat === null || typeof locationLat === "number") updates.locationLat = locationLat;
     if (locationLng === null || typeof locationLng === "number") updates.locationLng = locationLng;
+    if (typeof businessBio === "string") updates.businessBio = businessBio.trim();
+    if (typeof experienceLevel === "string") updates.experienceLevel = experienceLevel.trim();
+    if (typeof serviceCity === "string") updates.serviceCity = serviceCity.trim();
+    if (serviceLocationLat === null || typeof serviceLocationLat === "number") {
+      updates.serviceLocationLat = serviceLocationLat;
+    }
+    if (serviceLocationLng === null || typeof serviceLocationLng === "number") {
+      updates.serviceLocationLng = serviceLocationLng;
+    }
 
     if ("firstName" in updates && !updates.firstName) {
       return res.status(400).json({
@@ -116,7 +137,7 @@ const updateProfile = async (req, res, next) => {
     const updatedUser = await User.findByIdAndUpdate(req.user.id, updates, {
       new: true,
       runValidators: true,
-    }).select("_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng");
+    }).select("_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng");
 
     if (!updatedUser) {
       return res.status(404).json({
@@ -141,6 +162,13 @@ const updateProfile = async (req, res, next) => {
           preferredLanguage: updatedUser.preferredLanguage || "English (US)",
           locationLat: typeof updatedUser.locationLat === "number" ? updatedUser.locationLat : null,
           locationLng: typeof updatedUser.locationLng === "number" ? updatedUser.locationLng : null,
+          businessBio: updatedUser.businessBio || "",
+          experienceLevel: updatedUser.experienceLevel || "",
+          serviceCity: updatedUser.serviceCity || "",
+          serviceLocationLat:
+            typeof updatedUser.serviceLocationLat === "number" ? updatedUser.serviceLocationLat : null,
+          serviceLocationLng:
+            typeof updatedUser.serviceLocationLng === "number" ? updatedUser.serviceLocationLng : null,
         },
       },
     });

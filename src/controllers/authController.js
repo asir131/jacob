@@ -65,6 +65,13 @@ const buildAuthPayload = (user, accessToken, refreshToken) => {
       preferredLanguage: user.preferredLanguage || "English (US)",
       locationLat: typeof user.locationLat === "number" ? user.locationLat : null,
       locationLng: typeof user.locationLng === "number" ? user.locationLng : null,
+      businessBio: user.businessBio || "",
+      experienceLevel: user.experienceLevel || "",
+      serviceCity: user.serviceCity || "",
+      serviceLocationLat:
+        typeof user.serviceLocationLat === "number" ? user.serviceLocationLat : null,
+      serviceLocationLng:
+        typeof user.serviceLocationLng === "number" ? user.serviceLocationLng : null,
     },
   };
 };
