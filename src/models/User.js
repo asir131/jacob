@@ -28,6 +28,33 @@ const userSchema = new mongoose.Schema(
       enum: ["client", "provider", "superAdmin"],
       required: true,
     },
+    avatar: {
+      type: String,
+      default: "",
+    },
+    phone: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    address: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    preferredLanguage: {
+      type: String,
+      default: "English (US)",
+      trim: true,
+    },
+    locationLat: {
+      type: Number,
+      default: null,
+    },
+    locationLng: {
+      type: Number,
+      default: null,
+    },
     isVerified: {
       type: Boolean,
       default: false,

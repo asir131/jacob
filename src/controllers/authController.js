@@ -59,6 +59,12 @@ const buildAuthPayload = (user, accessToken, refreshToken) => {
       lastName: user.lastName,
       email: user.email,
       role: user.role,
+      avatar: user.avatar || "",
+      phone: user.phone || "",
+      address: user.address || "",
+      preferredLanguage: user.preferredLanguage || "English (US)",
+      locationLat: typeof user.locationLat === "number" ? user.locationLat : null,
+      locationLng: typeof user.locationLng === "number" ? user.locationLng : null,
     },
   };
 };
