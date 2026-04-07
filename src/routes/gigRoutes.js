@@ -4,8 +4,11 @@ const requireAuth = require("../middlewares/requireAuth");
 const requireAdmin = require("../middlewares/requireAdmin");
 const {
   createGig,
+  updateGig,
   listMyGigs,
   listPendingGigRequests,
+  deleteGig,
+  deleteGigRequest,
   approveGigRequest,
   rejectGigRequest,
 } = require("../controllers/gigController");
@@ -20,6 +23,9 @@ const upload = multer({
 });
 
 router.post("/", requireAuth, upload.array("images", 4), createGig);
+router.put("/:id", requireAuth, upload.array("images", 4), updateGig);
+router.delete("/:id", requireAuth, deleteGig);
+router.delete("/requests/:id", requireAuth, deleteGigRequest);
 router.get("/mine", requireAuth, listMyGigs);
 router.get("/pending", requireAuth, requireAdmin, listPendingGigRequests);
 router.post("/:id/approve", requireAuth, requireAdmin, approveGigRequest);
