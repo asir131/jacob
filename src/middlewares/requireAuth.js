@@ -1,4 +1,5 @@
 const jwt = require("jsonwebtoken");
+const User = require("../models/User");
 
 const parseBearerToken = (authorizationHeader = "") => {
   if (!authorizationHeader) return null;
@@ -17,13 +18,33 @@ const requireAuth = (req, res, next) => {
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = {
-      id: decoded.userId,
-      role: decoded.role,
-      email: decoded.email,
-    };
 
-    return next();
+    User.findById(decoded.userId)
+      .select("_id role email firstName lastName")
+      .then((user) => {
+        if (!user) {
+          return res.status(401).json({
+            success: false,
+            message: "User not found.",
+          });
+        }
+
+        req.user = {
+          id: user._id,
+          role: user.role,
+          email: user.email,
+          firstName: user.firstName || "",
+          lastName: user.lastName || "",
+        };
+
+        return next();
+      })
+      .catch(() => {
+        return res.status(401).json({
+          success: false,
+          message: "Invalid or expired token.",
+        });
+      });
   } catch (error) {
     return res.status(401).json({
       success: false,

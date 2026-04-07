@@ -5,12 +5,14 @@ const http = require("http");
 const app = require("./app");
 const connectDB = require("./config/db");
 const { initSocket } = require("./socket");
+const ensureSuperAdmin = require("./utils/ensureSuperAdmin");
 
 const PORT = process.env.PORT || 5000;
 
 const startServer = async () => {
   try {
     await connectDB();
+    await ensureSuperAdmin();
 
     const server = http.createServer(app);
     initSocket(server);

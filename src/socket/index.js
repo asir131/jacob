@@ -39,6 +39,9 @@ const initSocket = (httpServer) => {
   ioInstance.on("connection", (socket) => {
     const room = `user:${socket.data.userId}`;
     socket.join(room);
+    if (socket.data.role) {
+      socket.join(`role:${socket.data.role}`);
+    }
 
     socket.emit("socket:connected", {
       userId: socket.data.userId,
@@ -61,8 +64,14 @@ const emitToUser = (userId, eventName, payload) => {
   ioInstance.to(`user:${userId}`).emit(eventName, payload);
 };
 
+const emitToRole = (role, eventName, payload) => {
+  if (!ioInstance || !role) return;
+  ioInstance.to(`role:${role}`).emit(eventName, payload);
+};
+
 module.exports = {
   initSocket,
   getIO,
   emitToUser,
+  emitToRole,
 };

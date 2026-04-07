@@ -89,6 +89,7 @@ const updateProfile = async (req, res, next) => {
       lastName,
       phone,
       address,
+      role,
       preferredLanguage,
       locationLat,
       locationLng,
@@ -105,6 +106,9 @@ const updateProfile = async (req, res, next) => {
     if (typeof lastName === "string") updates.lastName = lastName.trim();
     if (typeof phone === "string") updates.phone = phone.trim();
     if (typeof address === "string") updates.address = address.trim();
+    if (typeof role === "string" && ["client", "provider"].includes(role)) {
+      updates.role = role;
+    }
     if (typeof preferredLanguage === "string") {
       updates.preferredLanguage = preferredLanguage.trim() || "English (US)";
     }

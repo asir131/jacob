@@ -2,15 +2,20 @@ const express = require("express");
 const cors = require("cors");
 const authRoutes = require("./routes/authRoutes");
 const notificationRoutes = require("./routes/notificationRoutes");
+const categoryRoutes = require("./routes/categoryRoutes");
+const gigRoutes = require("./routes/gigRoutes");
 const profileRoutes = require("./routes/profileRoutes");
 const errorHandler = require("./middlewares/errorHandler");
 
 const app = express();
-const corsOrigin = process.env.CORS_ORIGIN || "http://localhost:3000";
+const corsOrigins = (process.env.CORS_ORIGIN || "http://localhost:3000")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
 app.use(
   cors({
-    origin: corsOrigin,
+    origin: corsOrigins.length > 1 ? corsOrigins : corsOrigins[0],
     credentials: true,
   })
 );
@@ -25,6 +30,8 @@ app.get("/api/health", (req, res) => {
 
 app.use("/api/auth", authRoutes);
 app.use("/api/notifications", notificationRoutes);
+app.use("/api/categories", categoryRoutes);
+app.use("/api/gigs", gigRoutes);
 app.use("/api/profile", profileRoutes);
 
 app.use(errorHandler);
