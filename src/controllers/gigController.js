@@ -1,6 +1,7 @@
 const Category = require("../models/Category");
 const Gig = require("../models/Gig");
 const GigRequest = require("../models/GigRequest");
+const mongoose = require("mongoose");
 const cloudinary = require("../config/cloudinary");
 const slugify = require("../utils/slugify");
 const { emitToRole, emitToUser } = require("../socket");
@@ -875,6 +876,222 @@ const rejectGigRequest = async (req, res, next) => {
   }
 };
 
+const toRadians = (value) => (Number(value) * Math.PI) / 180;
+const calculateDistanceKm = (fromLat, fromLng, toLat, toLng) => {
+  if (
+    typeof fromLat !== "number" ||
+    typeof fromLng !== "number" ||
+    typeof toLat !== "number" ||
+    typeof toLng !== "number"
+  ) {
+    return null;
+  }
+
+  const earthRadiusKm = 6371;
+  const dLat = toRadians(toLat - fromLat);
+  const dLng = toRadians(toLng - fromLng);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRadians(fromLat)) *
+      Math.cos(toRadians(toLat)) *
+      Math.sin(dLng / 2) *
+      Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Number((earthRadiusKm * c).toFixed(1));
+};
+
+const listPublicServices = async (req, res, next) => {
+  try {
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.max(1, Math.min(50, Number(req.query.limit) || 9));
+    const radiusKm = Math.max(1, Number(req.query.radiusKm) || 25);
+    const categorySlug = String(req.query.categorySlug || "").trim().toLowerCase();
+    const search = String(req.query.search || "").trim().toLowerCase();
+    const clientLat = req.query.lat === undefined ? null : Number(req.query.lat);
+    const clientLng = req.query.lng === undefined ? null : Number(req.query.lng);
+    const hasClientLocation = Number.isFinite(clientLat) && Number.isFinite(clientLng);
+
+    const query = { status: "published" };
+    if (categorySlug && categorySlug !== "all") {
+      query.categorySlug = categorySlug;
+    }
+
+    const gigs = await Gig.find(query)
+      .populate("providerId", "_id firstName lastName avatar serviceLocationLat serviceLocationLng locationLat locationLng")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const normalized = gigs
+      .map((gig) => {
+        const packages = Array.isArray(gig.packages) ? gig.packages : [];
+        const validPrices = packages
+          .map((item) => Number(item?.price) || 0)
+          .filter((price) => price > 0);
+        const avgPackagePrice = validPrices.length
+          ? Number((validPrices.reduce((sum, price) => sum + price, 0) / validPrices.length).toFixed(2))
+          : 0;
+
+        const provider = gig.providerId || {};
+        const providerLat =
+          typeof gig.locationLat === "number"
+            ? gig.locationLat
+            : typeof provider.serviceLocationLat === "number"
+              ? provider.serviceLocationLat
+              : typeof provider.locationLat === "number"
+                ? provider.locationLat
+                : null;
+        const providerLng =
+          typeof gig.locationLng === "number"
+            ? gig.locationLng
+            : typeof provider.serviceLocationLng === "number"
+              ? provider.serviceLocationLng
+              : typeof provider.locationLng === "number"
+                ? provider.locationLng
+                : null;
+
+        const distanceKm = hasClientLocation
+          ? calculateDistanceKm(clientLat, clientLng, providerLat, providerLng)
+          : null;
+        const providerTravelRadiusKm = Number(gig.travelRadiusKm);
+        const normalizedProviderTravelRadiusKm =
+          Number.isFinite(providerTravelRadiusKm) && providerTravelRadiusKm > 0
+            ? providerTravelRadiusKm
+            : null;
+
+        const providerName = `${provider.firstName || ""} ${provider.lastName || ""}`.trim() || "Provider";
+
+        return {
+          id: gig._id,
+          title: gig.title || "",
+          categorySlug: gig.categorySlug || "",
+          categoryName: gig.categoryName || "",
+          image: Array.isArray(gig.images) && gig.images[0] ? gig.images[0] : "",
+          avgPackagePrice,
+          distanceKm,
+          providerTravelRadiusKm: normalizedProviderTravelRadiusKm,
+          provider: {
+            id: provider._id || "",
+            name: providerName,
+            avatar: provider.avatar || "",
+          },
+          createdAt: gig.createdAt,
+        };
+      })
+      .filter((item) => {
+        if (!search) return true;
+        return (
+          item.title.toLowerCase().includes(search) ||
+          item.categoryName.toLowerCase().includes(search) ||
+          item.provider.name.toLowerCase().includes(search)
+        );
+      })
+      .filter((item) => {
+        if (!hasClientLocation) return true;
+        if (typeof item.distanceKm !== "number") return false;
+        if (item.distanceKm > radiusKm) return false;
+        if (typeof item.providerTravelRadiusKm !== "number") return false;
+        return item.distanceKm <= item.providerTravelRadiusKm;
+      });
+
+    const totalItems = normalized.length;
+    const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+    const safePage = Math.min(page, totalPages);
+    const start = (safePage - 1) * limit;
+    const paginatedItems = normalized.slice(start, start + limit);
+
+    return res.status(200).json({
+      success: true,
+      message: "Services fetched successfully.",
+      data: {
+        items: paginatedItems,
+        pagination: {
+          page: safePage,
+          limit,
+          totalItems,
+          totalPages,
+          hasNextPage: safePage < totalPages,
+          hasPrevPage: safePage > 1,
+        },
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const getPublicServiceById = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found.",
+      });
+    }
+
+    const gig = await Gig.findOne({ _id: id, status: "published" })
+      .populate(
+        "providerId",
+        "_id firstName lastName avatar serviceLocationLat serviceLocationLng locationLat locationLng"
+      )
+      .lean();
+
+    if (!gig) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found.",
+      });
+    }
+
+    const provider = gig.providerId || {};
+    const providerName = `${provider.firstName || ""} ${provider.lastName || ""}`.trim() || "Provider";
+    const packages = Array.isArray(gig.packages) ? gig.packages : [];
+    const validPrices = packages
+      .map((item) => Number(item?.price) || 0)
+      .filter((price) => price > 0);
+    const avgPackagePrice = validPrices.length
+      ? Number((validPrices.reduce((sum, price) => sum + price, 0) / validPrices.length).toFixed(2))
+      : 0;
+
+    return res.status(200).json({
+      success: true,
+      message: "Service fetched successfully.",
+      data: {
+        id: gig._id,
+        title: gig.title || "",
+        categorySlug: gig.categorySlug || "",
+        categoryName: gig.categoryName || "",
+        description: gig.description || "",
+        requirements: gig.requirements || "",
+        images: Array.isArray(gig.images) ? gig.images : [],
+        baseCity: gig.baseCity || "",
+        locationLat: typeof gig.locationLat === "number" ? gig.locationLat : null,
+        locationLng: typeof gig.locationLng === "number" ? gig.locationLng : null,
+        travelRadiusKm: typeof gig.travelRadiusKm === "number" ? gig.travelRadiusKm : null,
+        avgPackagePrice,
+        packages: packages.map((item) => ({
+          name: item?.name || "",
+          title: item?.title || "",
+          description: item?.description || "",
+          deliveryTime: item?.deliveryTime || "",
+          price: Number(item?.price) || 0,
+        })),
+        provider: {
+          id: provider._id || "",
+          name: providerName,
+          avatar: provider.avatar || "",
+          type: "Solo",
+          level: "Level 2",
+          rating: 4.8,
+          completedOrders: 0,
+        },
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 module.exports = {
   createGig,
   updateGig,
@@ -884,4 +1101,6 @@ module.exports = {
   deleteGigRequest,
   approveGigRequest,
   rejectGigRequest,
+  listPublicServices,
+  getPublicServiceById,
 };

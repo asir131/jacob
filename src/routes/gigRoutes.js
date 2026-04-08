@@ -11,6 +11,8 @@ const {
   deleteGigRequest,
   approveGigRequest,
   rejectGigRequest,
+  listPublicServices,
+  getPublicServiceById,
 } = require("../controllers/gigController");
 
 const router = express.Router();
@@ -27,6 +29,8 @@ router.put("/:id", requireAuth, upload.array("images", 4), updateGig);
 router.delete("/:id", requireAuth, deleteGig);
 router.delete("/requests/:id", requireAuth, deleteGigRequest);
 router.get("/mine", requireAuth, listMyGigs);
+router.get("/public", listPublicServices);
+router.get("/public/:id", getPublicServiceById);
 router.get("/pending", requireAuth, requireAdmin, listPendingGigRequests);
 router.post("/:id/approve", requireAuth, requireAdmin, approveGigRequest);
 router.post("/:id/reject", requireAuth, requireAdmin, rejectGigRequest);
