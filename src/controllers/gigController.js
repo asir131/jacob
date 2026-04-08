@@ -353,8 +353,7 @@ const updateGig = async (req, res, next) => {
       customRequested &&
       (
         existingCustomFields.customCategoryName !== customCategoryName ||
-        existingCustomFields.customCategoryDescription !== customCategoryDescription ||
-        existingCustomFields.customCategoryIconName !== customCategoryIconName
+        existingCustomFields.customCategoryDescription !== customCategoryDescription
       );
 
     const categoryPayload = customRequested

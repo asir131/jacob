@@ -1,7 +1,17 @@
 const express = require("express");
 const multer = require("multer");
 const requireAuth = require("../middlewares/requireAuth");
-const { uploadAvatar, updateProfile, changePassword } = require("../controllers/profileController");
+const requireAdmin = require("../middlewares/requireAdmin");
+const {
+  uploadAvatar,
+  updateProfile,
+  changePassword,
+  submitPayoutInfo,
+  listProviderVerifications,
+  getProviderVerificationDetails,
+  approveProviderVerification,
+  rejectProviderVerification,
+} = require("../controllers/profileController");
 
 const router = express.Router();
 
@@ -15,5 +25,18 @@ const upload = multer({
 router.post("/avatar", requireAuth, upload.single("image"), uploadAvatar);
 router.put("/me", requireAuth, updateProfile);
 router.post("/change-password", requireAuth, changePassword);
+router.post(
+  "/provider/payout-info",
+  requireAuth,
+  upload.fields([
+    { name: "nidFront", maxCount: 1 },
+    { name: "nidBack", maxCount: 1 },
+  ]),
+  submitPayoutInfo
+);
+router.get("/admin/provider-verifications", requireAuth, requireAdmin, listProviderVerifications);
+router.get("/admin/provider-verifications/:providerId", requireAuth, requireAdmin, getProviderVerificationDetails);
+router.post("/admin/provider-verifications/:providerId/approve", requireAuth, requireAdmin, approveProviderVerification);
+router.post("/admin/provider-verifications/:providerId/reject", requireAuth, requireAdmin, rejectProviderVerification);
 
 module.exports = router;

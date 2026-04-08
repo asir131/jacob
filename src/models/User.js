@@ -78,6 +78,67 @@ const userSchema = new mongoose.Schema(
       type: Number,
       default: null,
     },
+    payoutInfo: {
+      accountHolderName: {
+        type: String,
+        default: "",
+        trim: true,
+      },
+      bankAccountNumber: {
+        type: String,
+        default: "",
+        trim: true,
+      },
+      routingNumber: {
+        type: String,
+        default: "",
+        trim: true,
+      },
+      bankName: {
+        type: String,
+        default: "",
+        trim: true,
+      },
+      accountType: {
+        type: String,
+        enum: ["checking", "savings", ""],
+        default: "",
+        trim: true,
+      },
+      nidFrontImageUrl: {
+        type: String,
+        default: "",
+        trim: true,
+      },
+      nidBackImageUrl: {
+        type: String,
+        default: "",
+        trim: true,
+      },
+      submittedAt: {
+        type: Date,
+        default: null,
+      },
+      reviewedAt: {
+        type: Date,
+        default: null,
+      },
+      reviewedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+      },
+      rejectionReason: {
+        type: String,
+        default: "",
+        trim: true,
+      },
+    },
+    payoutVerificationStatus: {
+      type: String,
+      enum: ["unverified", "pending", "verified", "rejected"],
+      default: "unverified",
+    },
     isVerified: {
       type: Boolean,
       default: false,

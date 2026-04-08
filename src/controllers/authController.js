@@ -72,6 +72,19 @@ const buildAuthPayload = (user, accessToken, refreshToken) => {
         typeof user.serviceLocationLat === "number" ? user.serviceLocationLat : null,
       serviceLocationLng:
         typeof user.serviceLocationLng === "number" ? user.serviceLocationLng : null,
+      payoutVerificationStatus: user.payoutVerificationStatus || "unverified",
+      payoutInfo: {
+        accountHolderName: user?.payoutInfo?.accountHolderName || "",
+        bankAccountNumber: user?.payoutInfo?.bankAccountNumber || "",
+        routingNumber: user?.payoutInfo?.routingNumber || "",
+        bankName: user?.payoutInfo?.bankName || "",
+        accountType: user?.payoutInfo?.accountType || "",
+        nidFrontImageUrl: user?.payoutInfo?.nidFrontImageUrl || "",
+        nidBackImageUrl: user?.payoutInfo?.nidBackImageUrl || "",
+        submittedAt: user?.payoutInfo?.submittedAt || null,
+        reviewedAt: user?.payoutInfo?.reviewedAt || null,
+        rejectionReason: user?.payoutInfo?.rejectionReason || "",
+      },
     },
   };
 };
