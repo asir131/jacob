@@ -5,6 +5,8 @@ const notificationRoutes = require("./routes/notificationRoutes");
 const categoryRoutes = require("./routes/categoryRoutes");
 const gigRoutes = require("./routes/gigRoutes");
 const profileRoutes = require("./routes/profileRoutes");
+const orderRoutes = require("./routes/orderRoutes");
+const chatRoutes = require("./routes/chatRoutes");
 const errorHandler = require("./middlewares/errorHandler");
 
 const app = express();
@@ -33,6 +35,8 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/categories", categoryRoutes);
 app.use("/api/gigs", gigRoutes);
 app.use("/api/profile", profileRoutes);
+app.use("/api/orders", orderRoutes);
+app.use("/api/chats", chatRoutes);
 
 app.use(errorHandler);
 

@@ -185,6 +185,31 @@ const updateProfile = async (req, res, next) => {
   }
 };
 
+const getMyProfile = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.id).select(
+      "_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus payoutInfo"
+    );
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Profile fetched successfully.",
+      data: {
+        user: serializeUser(user),
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 const submitPayoutInfo = async (req, res, next) => {
   try {
     if (!req.user || req.user.role !== "provider") {
@@ -549,6 +574,7 @@ const changePassword = async (req, res, next) => {
 };
 
 module.exports = {
+  getMyProfile,
   uploadAvatar,
   updateProfile,
   changePassword,

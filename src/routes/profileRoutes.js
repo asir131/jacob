@@ -3,6 +3,7 @@ const multer = require("multer");
 const requireAuth = require("../middlewares/requireAuth");
 const requireAdmin = require("../middlewares/requireAdmin");
 const {
+  getMyProfile,
   uploadAvatar,
   updateProfile,
   changePassword,
@@ -22,6 +23,7 @@ const upload = multer({
   },
 });
 
+router.get("/me", requireAuth, getMyProfile);
 router.post("/avatar", requireAuth, upload.single("image"), uploadAvatar);
 router.put("/me", requireAuth, updateProfile);
 router.post("/change-password", requireAuth, changePassword);
