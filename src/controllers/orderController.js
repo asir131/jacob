@@ -46,6 +46,7 @@ const buildOrderSummary = (order) => {
     orderNumber: order.orderNumber,
     conversationId: order.conversationId || null,
     orderName: gig.title || "Service order",
+    categoryName: String(order.categoryName || gig.categoryName || "").trim(),
     status: order.status,
     packageName: order.packageName,
     packageTitle: order.packageTitle,
@@ -78,6 +79,7 @@ const buildOrderSummary = (order) => {
       phone: provider.phone || "",
       address: provider.address || "",
       avatar: provider.avatar || "",
+      completedOrders: Number(provider.completedOrders) || 0,
     },
     gig: {
       id: gig._id || "",
@@ -154,6 +156,7 @@ const createOrder = async (req, res, next) => {
       providerId: gig.providerId,
       packageName: String(packageName).trim(),
       packageTitle: String(packageTitle).trim(),
+      categoryName: String(gig.categoryName || "").trim(),
       packagePrice: Number(packagePrice) || 0,
       scheduledDate: new Date(scheduledDate),
       scheduledTime: String(scheduledTime).trim(),
@@ -252,6 +255,139 @@ const listProviderOrders = async (req, res, next) => {
           hasNextPage: page < totalPages,
           hasPrevPage: page > 1,
         },
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const listClientOrders = async (req, res, next) => {
+  try {
+    if (!req.user || !["client", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only clients can view client orders.",
+      });
+    }
+
+    const page = parsePage(req.query.page, 1);
+    const limit = Math.min(20, parsePage(req.query.limit, 8));
+    const skip = (page - 1) * limit;
+    const status = String(req.query.status || "").trim().toLowerCase();
+    const search = String(req.query.search || "").trim();
+
+    const query = {
+      clientId: req.user.id,
+    };
+
+    if (status && status !== "all") {
+      if (status === "payment_pending") {
+        query.status = "accepting_delivery";
+      } else if (status === "cancelled") {
+        query.status = "declined";
+      } else {
+        query.status = status;
+      }
+    }
+
+    if (search) {
+      query.$or = [
+        { orderNumber: { $regex: search, $options: "i" } },
+        { packageTitle: { $regex: search, $options: "i" } },
+        { serviceAddress: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    const [orders, totalItems] = await Promise.all([
+      Order.find(query)
+        .populate("gigId", "_id title categoryName images")
+        .populate("clientId", "_id firstName lastName email phone address avatar locationLat locationLng")
+        .populate("providerId", "_id firstName lastName email phone address avatar")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Order.countDocuments(query),
+    ]);
+
+    const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+
+    return res.status(200).json({
+      success: true,
+      message: "Client orders fetched successfully.",
+      data: {
+        items: orders.map(buildOrderSummary),
+        pagination: {
+          page,
+          limit,
+          totalItems,
+          totalPages,
+          hasNextPage: page < totalPages,
+          hasPrevPage: page > 1,
+        },
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const getClientOrderDetail = async (req, res, next) => {
+  try {
+    if (!req.user || !["client", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only clients can view client order details.",
+      });
+    }
+
+    const rawId = String(req.params.id || "").trim();
+    const query = {
+      clientId: req.user.id,
+    };
+
+    if (rawId.startsWith("ORD-")) {
+      query.orderNumber = rawId;
+    } else {
+      query._id = rawId;
+    }
+
+    const order = await Order.findOne(query)
+      .populate("gigId", "_id title categoryName images")
+      .populate("clientId", "_id firstName lastName email phone address avatar locationLat locationLng")
+      .populate("providerId", "_id firstName lastName email phone address avatar")
+      .lean();
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found.",
+      });
+    }
+
+    const providerId = order?.providerId?._id || order?.providerId;
+    let completedOrders = 0;
+    if (providerId) {
+      completedOrders = await Order.countDocuments({
+        providerId,
+        status: "completed",
+      });
+    }
+
+    const normalizedOrder = buildOrderSummary({
+      ...order,
+      providerId: {
+        ...(order.providerId || {}),
+        completedOrders,
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Client order fetched successfully.",
+      data: {
+        order: normalizedOrder,
       },
     });
   } catch (error) {
@@ -567,7 +703,9 @@ const finalizeClientOrder = async (req, res, next) => {
 module.exports = {
   createOrder,
   listProviderOrders,
+  listClientOrders,
   getProviderOrderDetail,
+  getClientOrderDetail,
   acceptProviderOrder,
   declineProviderOrder,
   submitProviderDelivery,

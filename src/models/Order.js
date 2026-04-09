@@ -38,6 +38,11 @@ const orderSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    categoryName: {
+      type: String,
+      default: "",
+      trim: true,
+    },
     packagePrice: {
       type: Number,
       required: true,
