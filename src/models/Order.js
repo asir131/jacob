@@ -78,6 +78,24 @@ const orderSchema = new mongoose.Schema(
         default: "",
       },
     ],
+    revisionRequestNote: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    revisionResponseNote: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    revisionRequestedAt: {
+      type: Date,
+      default: null,
+    },
+    revisionRespondedAt: {
+      type: Date,
+      default: null,
+    },
     orderStartedAt: {
       type: Date,
       default: null,
@@ -96,7 +114,15 @@ const orderSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["pending", "accepted", "declined", "accepting_delivery", "completed"],
+      enum: [
+        "pending",
+        "accepted",
+        "declined",
+        "accepting_delivery",
+        "revision_requested",
+        "under_revision",
+        "completed",
+      ],
       default: "pending",
     },
   },

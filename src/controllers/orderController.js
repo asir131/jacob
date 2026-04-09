@@ -1,6 +1,8 @@
 const cloudinary = require("../config/cloudinary");
 const Gig = require("../models/Gig");
 const Order = require("../models/Order");
+const Message = require("../models/Message");
+const Conversation = require("../models/Conversation");
 const { emitToUser } = require("../socket");
 const { ensureConversationForOrder } = require("./chatController");
 
@@ -57,6 +59,10 @@ const buildOrderSummary = (order) => {
     specialInstructions: order.specialInstructions || "",
     deliveryNote: order.deliveryNote || "",
     deliveryImages: Array.isArray(order.deliveryImages) ? order.deliveryImages : [],
+    revisionRequestNote: order.revisionRequestNote || "",
+    revisionResponseNote: order.revisionResponseNote || "",
+    revisionRequestedAt: order.revisionRequestedAt || null,
+    revisionRespondedAt: order.revisionRespondedAt || null,
     createdAt: order.createdAt,
     requirementSubmittedAt: order.requirementSubmittedAt || order.createdAt || null,
     orderStartedAt: order.orderStartedAt || null,
@@ -102,6 +108,73 @@ const ensureOrderNumber = (order) => {
   if (!String(order.orderNumber || "").trim()) {
     order.orderNumber = createOrderNumber();
   }
+};
+
+const normalizeMessage = (message) => ({
+  id: message._id,
+  conversationId: message.conversationId,
+  orderId: message.orderId || null,
+  senderId: message.senderId?._id || message.senderId,
+  receiverId: message.receiverId?._id || message.receiverId,
+  text: message.text || "",
+  createdAt: message.createdAt,
+  readAt: message.readAt || null,
+});
+
+const sendSystemOrderMessage = async ({ order, senderId, receiverId, text }) => {
+  if (!order || !senderId || !receiverId || !String(text || "").trim()) return null;
+
+  const conversation = await ensureConversationForOrder({
+    orderId: order._id,
+    clientId: order.clientId,
+    providerId: order.providerId,
+  });
+  if (!conversation?._id) return null;
+
+  if (!order.conversationId) {
+    order.conversationId = conversation._id;
+    await order.save({ validateBeforeSave: false });
+  }
+
+  const message = await Message.create({
+    conversationId: conversation._id,
+    orderId: order._id,
+    senderId,
+    receiverId,
+    text: String(text).trim(),
+  });
+
+  await Conversation.findByIdAndUpdate(conversation._id, {
+    $set: {
+      lastMessage: String(text).trim(),
+      lastMessageAt: new Date(),
+    },
+  });
+
+  const hydrated = await Message.findById(message._id)
+    .populate("senderId", "_id firstName lastName avatar")
+    .populate("receiverId", "_id firstName lastName avatar")
+    .lean();
+  const normalized = normalizeMessage(hydrated);
+  const conversationId = String(conversation._id);
+
+  emitToUser(String(receiverId), "chat:message:new", normalized);
+  emitToUser(String(senderId), "chat:message:new", normalized);
+  emitToUser(String(receiverId), "chat:conversation:updated", {
+    conversationId,
+    lastMessage: String(text).trim(),
+    lastMessageAt: normalized.createdAt,
+  });
+  emitToUser(String(senderId), "chat:conversation:updated", {
+    conversationId,
+    lastMessage: String(text).trim(),
+    lastMessageAt: normalized.createdAt,
+  });
+
+  return {
+    conversationId,
+    message: normalized,
+  };
 };
 
 const createOrder = async (req, res, next) => {
@@ -217,7 +290,11 @@ const listProviderOrders = async (req, res, next) => {
     };
 
     if (status && status !== "all") {
-      query.status = status;
+      if (status === "request_revision") {
+        query.status = "revision_requested";
+      } else {
+        query.status = status;
+      }
     }
 
     if (search) {
@@ -591,14 +668,15 @@ const submitProviderDelivery = async (req, res, next) => {
       });
     }
 
-    if (!["accepted", "accepting_delivery"].includes(order.status)) {
+    if (!["accepted", "accepting_delivery", "under_revision"].includes(order.status)) {
       return res.status(400).json({
         success: false,
         message: "This order is not in a deliverable state.",
       });
     }
 
-    const deliveryNote = String(req.body.deliveryNote || "").trim();
+    const incomingDeliveryNote = String(req.body.deliveryNote || "").trim();
+    const deliveryNote = incomingDeliveryNote || String(order.deliveryNote || "").trim();
     if (!deliveryNote) {
       return res.status(400).json({
         success: false,
@@ -607,11 +685,18 @@ const submitProviderDelivery = async (req, res, next) => {
     }
 
     const uploadedImages = await uploadDeliveryImages(req.files || []);
+    const nextImages =
+      Array.isArray(uploadedImages) && uploadedImages.length
+        ? uploadedImages
+        : Array.isArray(order.deliveryImages)
+          ? order.deliveryImages
+          : [];
 
     order.deliveryNote = deliveryNote;
-    order.deliveryImages = uploadedImages;
+    order.deliveryImages = nextImages;
     order.deliveryPendingAt = new Date();
     order.status = "accepting_delivery";
+    order.revisionResponseNote = "";
     ensureOrderNumber(order);
     await order.save();
 
@@ -634,6 +719,294 @@ const submitProviderDelivery = async (req, res, next) => {
       message: "Delivery submitted successfully.",
       data: {
         order,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const requestClientRevision = async (req, res, next) => {
+  try {
+    if (!req.user || !["client", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only clients can request revision.",
+      });
+    }
+
+    const order = await Order.findOne({
+      _id: req.params.id,
+      clientId: req.user.id,
+    }).populate("gigId", "_id title");
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found.",
+      });
+    }
+
+    if (order.status !== "accepting_delivery") {
+      return res.status(400).json({
+        success: false,
+        message: "Revision can only be requested after delivery submission.",
+      });
+    }
+
+    const note = String(req.body.note || "").trim();
+    if (!note) {
+      return res.status(400).json({
+        success: false,
+        message: "Revision note is required.",
+      });
+    }
+
+    order.status = "revision_requested";
+    order.revisionRequestNote = note;
+    order.revisionRequestedAt = new Date();
+    order.revisionResponseNote = "";
+    order.revisionRespondedAt = null;
+    await order.save();
+
+    const chat = await sendSystemOrderMessage({
+      order,
+      senderId: order.clientId,
+      receiverId: order.providerId,
+      text: `Revision requested: ${note}`,
+    });
+
+    emitToUser(String(order.providerId), "notification:new", {
+      id: `NTF-${Date.now()}`,
+      type: "warning",
+      title: "Client requested revision",
+      description: `Revision requested for ${order.gigId?.title || "an order"}.`,
+      data: {
+        notificationType: "order_revision_requested",
+        orderId: order._id.toString(),
+        targetPath: `/provider/orders/${order._id.toString()}`,
+        conversationId: chat?.conversationId || "",
+      },
+      unread: true,
+      createdAt: new Date().toISOString(),
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Revision requested successfully.",
+      data: { order: buildOrderSummary(order) },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const respondProviderRevision = async (req, res, next) => {
+  try {
+    if (!req.user || !["provider", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only providers can respond to revision requests.",
+      });
+    }
+
+    const order = await Order.findOne({
+      _id: req.params.id,
+      providerId: req.user.id,
+    }).populate("gigId", "_id title");
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found.",
+      });
+    }
+
+    if (order.status !== "revision_requested") {
+      return res.status(400).json({
+        success: false,
+        message: "No revision request available for this order.",
+      });
+    }
+
+    const action = String(req.body.action || "").trim().toLowerCase();
+    const note = String(req.body.note || "").trim();
+    if (!["accept", "decline"].includes(action)) {
+      return res.status(400).json({
+        success: false,
+        message: "Action must be accept or decline.",
+      });
+    }
+
+    if (action === "accept") {
+      order.status = "under_revision";
+      order.revisionResponseNote = note || "Provider accepted revision request.";
+      order.revisionRespondedAt = new Date();
+    } else {
+      order.status = "accepting_delivery";
+      order.revisionResponseNote = note || "Provider declined revision request.";
+      order.revisionRespondedAt = new Date();
+    }
+    await order.save();
+
+    const text =
+      action === "accept"
+        ? `Provider accepted revision request.${note ? ` Note: ${note}` : ""}`
+        : `Provider declined revision request.${note ? ` Note: ${note}` : ""}`;
+    const chat = await sendSystemOrderMessage({
+      order,
+      senderId: order.providerId,
+      receiverId: order.clientId,
+      text,
+    });
+
+    emitToUser(String(order.clientId), "notification:new", {
+      id: `NTF-${Date.now()}`,
+      type: action === "accept" ? "system" : "warning",
+      title: action === "accept" ? "Revision accepted by provider" : "Revision declined by provider",
+      description:
+        action === "accept"
+          ? `Provider is working on your revision for ${order.gigId?.title || "order"}.`
+          : `Provider declined revision for ${order.gigId?.title || "order"}. You can continue with payment.`,
+      data: {
+        notificationType: action === "accept" ? "order_revision_accepted" : "order_revision_declined",
+        orderId: order._id.toString(),
+        targetPath: `/client/orders/${order.orderNumber || order._id.toString()}`,
+        conversationId: chat?.conversationId || "",
+      },
+      unread: true,
+      createdAt: new Date().toISOString(),
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: action === "accept" ? "Revision accepted." : "Revision declined.",
+      data: { order: buildOrderSummary(order) },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const cancelClientRevisionRequest = async (req, res, next) => {
+  try {
+    if (!req.user || !["client", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only clients can cancel revision request.",
+      });
+    }
+
+    const order = await Order.findOne({
+      _id: req.params.id,
+      clientId: req.user.id,
+    }).populate("gigId", "_id title");
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found.",
+      });
+    }
+
+    if (!["revision_requested", "under_revision"].includes(order.status)) {
+      return res.status(400).json({
+        success: false,
+        message: "This order has no active revision request.",
+      });
+    }
+
+    order.status = "accepting_delivery";
+    order.revisionResponseNote = "Client cancelled revision request.";
+    order.revisionRespondedAt = new Date();
+    await order.save();
+
+    const chat = await sendSystemOrderMessage({
+      order,
+      senderId: order.clientId,
+      receiverId: order.providerId,
+      text: "Client cancelled revision request and moved back to delivery acceptance.",
+    });
+
+    emitToUser(String(order.providerId), "notification:new", {
+      id: `NTF-${Date.now()}`,
+      type: "system",
+      title: "Revision request cancelled",
+      description: "Client cancelled revision request. Order is back to delivery acceptance.",
+      data: {
+        notificationType: "order_revision_cancelled",
+        orderId: order._id.toString(),
+        targetPath: `/provider/orders/${order._id.toString()}`,
+        conversationId: chat?.conversationId || "",
+      },
+      unread: true,
+      createdAt: new Date().toISOString(),
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Revision request cancelled successfully.",
+      data: { order: buildOrderSummary(order) },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const sendClientResolutionMessage = async (req, res, next) => {
+  try {
+    if (!req.user || !["client", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only clients can send resolution messages.",
+      });
+    }
+
+    const order = await Order.findOne({
+      _id: req.params.id,
+      clientId: req.user.id,
+    }).populate("gigId", "_id title");
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found.",
+      });
+    }
+
+    const text = String(req.body.text || "").trim();
+    const fallbackText = `Client wants to discuss revision for ${order.gigId?.title || "this order"}.`;
+    const finalText = text || fallbackText;
+
+    const chat = await sendSystemOrderMessage({
+      order,
+      senderId: order.clientId,
+      receiverId: order.providerId,
+      text: finalText,
+    });
+
+    emitToUser(String(order.providerId), "notification:new", {
+      id: `NTF-${Date.now()}`,
+      type: "system",
+      title: "New resolution message",
+      description: finalText.length > 120 ? `${finalText.slice(0, 117)}...` : finalText,
+      data: {
+        notificationType: "order_resolution_message",
+        orderId: order._id.toString(),
+        targetPath: chat?.conversationId
+          ? `/messages?conversationId=${chat.conversationId}&orderId=${order._id.toString()}`
+          : `/messages?orderId=${order._id.toString()}`,
+        conversationId: chat?.conversationId || "",
+      },
+      unread: true,
+      createdAt: new Date().toISOString(),
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Resolution message sent.",
+      data: {
+        conversationId: chat?.conversationId || "",
       },
     });
   } catch (error) {
@@ -709,5 +1082,9 @@ module.exports = {
   acceptProviderOrder,
   declineProviderOrder,
   submitProviderDelivery,
+  requestClientRevision,
+  respondProviderRevision,
+  cancelClientRevisionRequest,
+  sendClientResolutionMessage,
   finalizeClientOrder,
 };

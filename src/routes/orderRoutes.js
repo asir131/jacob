@@ -10,6 +10,10 @@ const {
   acceptProviderOrder,
   declineProviderOrder,
   submitProviderDelivery,
+  requestClientRevision,
+  respondProviderRevision,
+  cancelClientRevisionRequest,
+  sendClientResolutionMessage,
   finalizeClientOrder,
 } = require("../controllers/orderController");
 
@@ -26,7 +30,11 @@ router.get("/client", requireAuth, listClientOrders);
 router.get("/client/:id", requireAuth, getClientOrderDetail);
 router.patch("/provider/:id/accept", requireAuth, acceptProviderOrder);
 router.patch("/provider/:id/decline", requireAuth, declineProviderOrder);
+router.patch("/provider/:id/revision-response", requireAuth, respondProviderRevision);
 router.patch("/provider/:id/deliver", requireAuth, upload.array("deliveryImages", 4), submitProviderDelivery);
+router.patch("/client/:id/request-revision", requireAuth, requestClientRevision);
+router.patch("/client/:id/cancel-revision", requireAuth, cancelClientRevisionRequest);
+router.post("/client/:id/resolution-message", requireAuth, sendClientResolutionMessage);
 router.patch("/client/:id/finalize", requireAuth, finalizeClientOrder);
 
 module.exports = router;
