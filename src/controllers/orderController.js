@@ -75,11 +75,11 @@ const buildOrderSummary = (order) => {
   const provider = order.providerId || {};
   const gig = order.gigId || {};
 
-    return {
-      id: order._id,
-      orderNumber: order.orderNumber,
-      conversationId: order.conversationId || null,
-      orderName: gig.title || "Service order",
+  return {
+    id: order._id,
+    orderNumber: order.orderNumber,
+    conversationId: order.conversationId || null,
+    orderName: order.packageTitle || order.categoryName || gig.title || "Service order",
     categoryName: String(order.categoryName || gig.categoryName || "").trim(),
       status: order.status,
       revisionType:
@@ -113,6 +113,7 @@ const buildOrderSummary = (order) => {
     platformFeeAmount: Number(order.platformFeeAmount) || 0,
     providerEarningsAmount: Number(order.providerEarningsAmount) || 0,
     paidAt: order.paidAt || null,
+    isRequestedOrder: !gig._id || !gig.title,
     client: {
       id: client._id || "",
       name: `${client.firstName || ""} ${client.lastName || ""}`.trim() || "Client",

@@ -302,10 +302,97 @@ const sendMessage = async (req, res, next) => {
   }
 };
 
+const markConversationMessagesAsRead = async (req, res, next) => {
+  try {
+    if (!req.user?.id) {
+      return res.status(401).json({ success: false, message: "Unauthorized." });
+    }
+
+    const { conversationId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({ success: false, message: "Invalid conversation id." });
+    }
+
+    const conversation = await Conversation.findById(conversationId).select("_id participants");
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "Conversation not found." });
+    }
+
+    const allowed = conversation.participants.some((id) => String(id) === String(req.user.id));
+    if (!allowed && req.user.role !== "superAdmin") {
+      return res.status(403).json({ success: false, message: "Forbidden." });
+    }
+
+    const result = await Message.updateMany(
+      {
+        conversationId,
+        receiverId: req.user.id,
+        readAt: null,
+      },
+      {
+        $set: {
+          readAt: new Date(),
+        },
+      }
+    );
+
+    emitToUser(String(req.user.id), "chat:conversation:updated", {
+      conversationId: String(conversation._id),
+      unreadMessagesMarkedRead: true,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Conversation messages marked as read.",
+      data: {
+        modifiedCount: Number(result?.modifiedCount || 0),
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const markAllProviderMessagesAsRead = async (req, res, next) => {
+  try {
+    if (!req.user?.id) {
+      return res.status(401).json({ success: false, message: "Unauthorized." });
+    }
+
+    const result = await Message.updateMany(
+      {
+        receiverId: req.user.id,
+        readAt: null,
+      },
+      {
+        $set: {
+          readAt: new Date(),
+        },
+      }
+    );
+
+    emitToUser(String(req.user.id), "chat:conversation:updated", {
+      allConversationsMarkedRead: true,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "All provider messages marked as read.",
+      data: {
+        modifiedCount: Number(result?.modifiedCount || 0),
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 module.exports = {
   ensureConversationForOrder,
   getConversations,
   ensureConversationByOrder,
   getConversationMessages,
   sendMessage,
+  markConversationMessagesAsRead,
+  markAllProviderMessagesAsRead,
 };

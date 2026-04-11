@@ -2,6 +2,8 @@ const User = require("../models/User");
 const WithdrawalRequest = require("../models/WithdrawalRequest");
 const { emitToRole, emitToUser } = require("../socket");
 
+const WITHDRAWAL_STATUSES = ["pending", "approved", "rejected", "paid"];
+
 const buildWithdrawal = (doc) => ({
   id: doc._id,
   amount: Number(doc.amount) || 0,
@@ -12,6 +14,27 @@ const buildWithdrawal = (doc) => ({
   processedAt: doc.processedAt || null,
 });
 
+const parsePagination = (req, defaultLimit = 8) => {
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.max(1, Math.min(50, Number(req.query.limit) || defaultLimit));
+  return { page, limit };
+};
+
+const parseStatusFilter = (rawStatus, fallback = "all") => {
+  const normalized = String(rawStatus || fallback).trim().toLowerCase();
+  if (normalized === "all") return null;
+  if (normalized === "review" || normalized === "processing" || normalized === "pending-review") {
+    return ["pending", "approved"];
+  }
+
+  const list = normalized
+    .split(",")
+    .map((status) => status.trim())
+    .filter((status) => WITHDRAWAL_STATUSES.includes(status));
+
+  return list.length ? list : null;
+};
+
 const getMyWithdrawals = async (req, res, next) => {
   try {
     if (!req.user || req.user.role !== "provider") {
@@ -21,16 +44,27 @@ const getMyWithdrawals = async (req, res, next) => {
       });
     }
 
+    const { page, limit } = parsePagination(req, 8);
+    const requestedStatuses = parseStatusFilter(req.query.status, "all");
     const user = await User.findById(req.user.id).select("_id walletBalance totalEarnings totalWithdrawn");
     const pendingTotalAgg = await WithdrawalRequest.aggregate([
-      { $match: { providerId: user._id, status: "pending" } },
+      { $match: { providerId: user._id, status: { $in: ["pending", "approved"] } } },
       { $group: { _id: null, total: { $sum: "$amount" } } },
     ]);
     const pendingWithdrawalAmount = Number(pendingTotalAgg?.[0]?.total || 0);
     const availableBalance = Math.max(Number(user?.walletBalance || 0) - pendingWithdrawalAmount, 0);
-    const withdrawals = await WithdrawalRequest.find({ providerId: req.user.id })
+    const query = { providerId: req.user.id };
+    if (requestedStatuses) {
+      query.status = { $in: requestedStatuses };
+    }
+
+    const totalItems = await WithdrawalRequest.countDocuments(query);
+    const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+    const safePage = Math.min(page, totalPages);
+    const withdrawals = await WithdrawalRequest.find(query)
       .sort({ createdAt: -1 })
-      .limit(50)
+      .skip((safePage - 1) * limit)
+      .limit(limit)
       .lean();
 
     return res.status(200).json({
@@ -43,6 +77,14 @@ const getMyWithdrawals = async (req, res, next) => {
           totalWithdrawn: Number(user?.totalWithdrawn || 0),
         },
         withdrawals: withdrawals.map(buildWithdrawal),
+        pagination: {
+          page: safePage,
+          limit,
+          totalItems,
+          totalPages,
+          hasNextPage: safePage < totalPages,
+          hasPrevPage: safePage > 1,
+        },
       },
     });
   } catch (error) {
@@ -68,7 +110,7 @@ const requestWithdrawal = async (req, res, next) => {
       });
     }
 
-    const user = await User.findById(req.user.id).select("_id walletBalance");
+    const user = await User.findById(req.user.id).select("_id firstName lastName email walletBalance");
     const pendingTotalAgg = await WithdrawalRequest.aggregate([
       { $match: { providerId: user._id, status: "pending" } },
       { $group: { _id: null, total: { $sum: "$amount" } } },
@@ -99,6 +141,9 @@ const requestWithdrawal = async (req, res, next) => {
       data: {
         notificationType: "withdrawal_request_created",
         withdrawalId: request._id.toString(),
+        providerId: req.user.id,
+        providerName: [user?.firstName, user?.lastName].filter(Boolean).join(" ") || user?.email || "Provider",
+        amount,
         targetPath: "/withdrawals",
       },
       unread: true,
@@ -124,16 +169,21 @@ const getAdminWithdrawals = async (req, res, next) => {
       });
     }
 
-    const status = String(req.query.status || "pending").trim().toLowerCase();
+    const { page, limit } = parsePagination(req, 8);
+    const requestedStatuses = parseStatusFilter(req.query.status, "review");
     const query = {};
-    if (["pending", "approved", "rejected", "paid"].includes(status)) {
-      query.status = status;
+    if (requestedStatuses) {
+      query.status = { $in: requestedStatuses };
     }
 
+    const totalItems = await WithdrawalRequest.countDocuments(query);
+    const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+    const safePage = Math.min(page, totalPages);
     const withdrawals = await WithdrawalRequest.find(query)
       .populate("providerId", "_id firstName lastName email avatar walletBalance totalEarnings totalWithdrawn payoutInfo payoutVerificationStatus")
       .sort({ createdAt: -1 })
-      .limit(100)
+      .skip((safePage - 1) * limit)
+      .limit(limit)
       .lean();
 
     const items = withdrawals.map((doc) => ({
@@ -157,7 +207,17 @@ const getAdminWithdrawals = async (req, res, next) => {
 
     return res.status(200).json({
       success: true,
-      data: items,
+      data: {
+        items,
+        pagination: {
+          page: safePage,
+          limit,
+          totalItems,
+          totalPages,
+          hasNextPage: safePage < totalPages,
+          hasPrevPage: safePage > 1,
+        },
+      },
     });
   } catch (error) {
     return next(error);
@@ -205,6 +265,7 @@ const reviewWithdrawal = async (req, res, next) => {
         data: {
           notificationType: "withdrawal_request_rejected",
           withdrawalId: withdrawal._id.toString(),
+          amount: Number(withdrawal.amount) || 0,
           targetPath: "/provider/withdrawals",
         },
         unread: true,
@@ -224,6 +285,7 @@ const reviewWithdrawal = async (req, res, next) => {
         data: {
           notificationType: "withdrawal_request_approved",
           withdrawalId: withdrawal._id.toString(),
+          amount: Number(withdrawal.amount) || 0,
           targetPath: "/provider/withdrawals",
         },
         unread: true,
@@ -259,6 +321,7 @@ const reviewWithdrawal = async (req, res, next) => {
         data: {
           notificationType: "withdrawal_paid",
           withdrawalId: withdrawal._id.toString(),
+          amount,
           targetPath: "/provider/withdrawals",
         },
         unread: true,

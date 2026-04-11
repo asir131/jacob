@@ -11,7 +11,8 @@ const orderSchema = new mongoose.Schema(
     gigId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Gig",
-      required: true,
+      required: false,
+      default: null,
     },
     clientId: {
       type: mongoose.Schema.Types.ObjectId,
