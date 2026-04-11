@@ -159,6 +159,12 @@ const userSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    sellerLevel: {
+      type: String,
+      enum: ["New", "Level 1", "Level 2", "Level 3", "Top Rated"],
+      default: "New",
+      trim: true,
+    },
     isVerified: {
       type: Boolean,
       default: false,

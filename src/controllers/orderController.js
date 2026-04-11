@@ -133,6 +133,7 @@ const buildOrderSummary = (order) => {
       completedOrders: Number(provider.completedOrders) || 0,
       walletBalance: Number(provider.walletBalance) || 0,
       totalEarnings: Number(provider.totalEarnings) || 0,
+      sellerLevel: provider.sellerLevel || "New",
     },
     gig: {
       id: gig._id || "",
@@ -161,40 +162,60 @@ const buildDashboardRequestCard = (order) => {
   };
 };
 
-const refreshProviderRatingStats = async (providerId) => {
+const resolveSellerLevel = (completedOrderCount = 0) => {
+  const total = Number(completedOrderCount) || 0;
+  if (total >= 11) return "Top Rated";
+  if (total >= 8) return "Level 3";
+  if (total >= 5) return "Level 2";
+  if (total >= 2) return "Level 1";
+  return "New";
+};
+
+const refreshProviderPerformanceStats = async (providerId) => {
   if (!providerId) return;
 
-  const stats = await Order.aggregate([
-    {
-      $match: {
-        providerId: new mongoose.Types.ObjectId(String(providerId)),
-        status: "completed",
-        paymentStatus: "paid",
-        clientRating: { $ne: null },
+  const providerObjectId = new mongoose.Types.ObjectId(String(providerId));
+  const [stats, completedOrderCount] = await Promise.all([
+    Order.aggregate([
+      {
+        $match: {
+          providerId: providerObjectId,
+          status: "completed",
+          paymentStatus: "paid",
+          clientRating: { $ne: null },
+        },
       },
-    },
-    {
-      $group: {
-        _id: null,
-        averageRating: { $avg: "$clientRating" },
-        reviewCount: { $sum: 1 },
+      {
+        $group: {
+          _id: null,
+          averageRating: { $avg: "$clientRating" },
+          reviewCount: { $sum: 1 },
+        },
       },
-    },
+    ]),
+    Order.countDocuments({
+      providerId,
+      status: "completed",
+      paymentStatus: "paid",
+    }),
   ]);
 
   const averageRating = Number(stats?.[0]?.averageRating || 0);
   const reviewCount = Number(stats?.[0]?.reviewCount || 0);
+  const sellerLevel = resolveSellerLevel(completedOrderCount);
 
   await User.findByIdAndUpdate(providerId, {
     $set: {
       averageRating,
       reviewCount,
+      sellerLevel,
     },
   });
 
   return {
     averageRating,
     reviewCount,
+    sellerLevel,
   };
 };
 
@@ -237,7 +258,7 @@ const getProviderDashboard = async (req, res, next) => {
       monthlyEarnings,
       pendingRequestDocs,
     ] = await Promise.all([
-      User.findById(providerId).select("_id walletBalance totalEarnings totalWithdrawn averageRating reviewCount").lean(),
+      User.findById(providerId).select("_id walletBalance totalEarnings totalWithdrawn averageRating reviewCount sellerLevel").lean(),
       Order.countDocuments({ providerId }),
       Order.countDocuments({ providerId, status: "pending" }),
       Order.countDocuments({
@@ -287,6 +308,7 @@ const getProviderDashboard = async (req, res, next) => {
     const totalEarnings = Number(providerProfile?.totalEarnings || 0);
     const walletBalance = Number(providerProfile?.walletBalance || 0);
     const totalWithdrawn = Number(providerProfile?.totalWithdrawn || 0);
+    const sellerLevel = String(providerProfile?.sellerLevel || "New");
     const completionRate = totalOrders > 0 ? Number(((completedOrders / totalOrders) * 100).toFixed(1)) : 0;
 
     const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -305,6 +327,7 @@ const getProviderDashboard = async (req, res, next) => {
           walletBalance,
           totalWithdrawn,
         },
+        sellerLevel,
         orders: {
           totalOrders,
           pendingOrders,
@@ -509,7 +532,7 @@ const submitClientOrderReview = async (req, res, next) => {
     order.clientRating = rating;
     order.clientReview = review;
     await order.save();
-    await refreshProviderRatingStats(order.providerId);
+    await refreshProviderPerformanceStats(order.providerId);
 
     emitToUser(String(order.providerId), "notification:new", {
       id: `NTF-${Date.now()}`,
@@ -1285,6 +1308,9 @@ const submitProviderDelivery = async (req, res, next) => {
       }
       ensureOrderNumber(order);
       await order.save();
+      if (order.status === "completed") {
+        await refreshProviderPerformanceStats(order.providerId);
+      }
 
       emitToUser(String(order.clientId), "notification:new", {
         id: `NTF-${Date.now()}`,
@@ -1773,7 +1799,7 @@ const confirmClientCheckoutPayment = async (req, res, next) => {
     });
 
     if (Number.isFinite(Number(clientRating)) && Number(clientRating) > 0) {
-      await refreshProviderRatingStats(order.providerId);
+      await refreshProviderPerformanceStats(order.providerId);
     }
 
     return res.status(200).json({
@@ -1885,6 +1911,7 @@ const finalizeClientOrder = async (req, res, next) => {
     order.completedAt = new Date();
     ensureOrderNumber(order);
     await order.save();
+    await refreshProviderPerformanceStats(order.providerId);
 
     emitToUser(String(order.providerId), "notification:new", {
       id: `NTF-${Date.now()}`,

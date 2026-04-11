@@ -917,7 +917,7 @@ const listPublicServices = async (req, res, next) => {
     }
 
     const gigs = await Gig.find(query)
-      .populate("providerId", "_id firstName lastName avatar serviceLocationLat serviceLocationLng locationLat locationLng")
+      .populate("providerId", "_id firstName lastName avatar serviceLocationLat serviceLocationLng locationLat locationLng sellerLevel averageRating reviewCount")
       .sort({ createdAt: -1 })
       .lean();
 
@@ -973,6 +973,9 @@ const listPublicServices = async (req, res, next) => {
             id: provider._id || "",
             name: providerName,
             avatar: provider.avatar || "",
+            level: provider.sellerLevel || "New",
+            rating: Number(provider.averageRating) || 0,
+            reviewCount: Number(provider.reviewCount) || 0,
           },
           createdAt: gig.createdAt,
         };
@@ -1044,7 +1047,7 @@ const getPublicServiceById = async (req, res, next) => {
     const gig = await Gig.findOne({ _id: id, status: "published" })
       .populate(
         "providerId",
-        "_id firstName lastName avatar serviceLocationLat serviceLocationLng locationLat locationLng"
+        "_id firstName lastName avatar serviceLocationLat serviceLocationLng locationLat locationLng sellerLevel averageRating reviewCount"
       )
       .lean();
 
@@ -1093,9 +1096,9 @@ const getPublicServiceById = async (req, res, next) => {
           name: providerName,
           avatar: provider.avatar || "",
           type: "Solo",
-          level: "Level 2",
-          rating: 4.8,
-          completedOrders: 0,
+          level: provider.sellerLevel || "New",
+          rating: Number(provider.averageRating) || 0,
+          reviewCount: Number(provider.reviewCount) || 0,
         },
       },
     });

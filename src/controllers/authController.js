@@ -76,6 +76,9 @@ const buildAuthPayload = (user, accessToken, refreshToken) => {
       walletBalance: Number(user.walletBalance) || 0,
       totalEarnings: Number(user.totalEarnings) || 0,
       totalWithdrawn: Number(user.totalWithdrawn) || 0,
+      averageRating: Number(user.averageRating) || 0,
+      reviewCount: Number(user.reviewCount) || 0,
+      sellerLevel: user.sellerLevel || "New",
       payoutInfo: {
         accountHolderName: user?.payoutInfo?.accountHolderName || "",
         bankAccountNumber: user?.payoutInfo?.bankAccountNumber || "",

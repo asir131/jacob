@@ -32,6 +32,9 @@ const serializeUser = (userDoc) => {
     walletBalance: Number(userDoc.walletBalance) || 0,
     totalEarnings: Number(userDoc.totalEarnings) || 0,
     totalWithdrawn: Number(userDoc.totalWithdrawn) || 0,
+    averageRating: Number(userDoc.averageRating) || 0,
+    reviewCount: Number(userDoc.reviewCount) || 0,
+    sellerLevel: userDoc.sellerLevel || "New",
     payoutInfo: {
       accountHolderName: userDoc?.payoutInfo?.accountHolderName || "",
       bankAccountNumber: userDoc?.payoutInfo?.bankAccountNumber || "",
@@ -86,7 +89,7 @@ const uploadAvatar = async (req, res, next) => {
       req.user.id,
       { avatar: result.secure_url },
       { new: true }
-    ).select("_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus walletBalance totalEarnings totalWithdrawn payoutInfo");
+    ).select("_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus walletBalance totalEarnings totalWithdrawn averageRating reviewCount sellerLevel payoutInfo");
 
     if (!updatedUser) {
       return res.status(404).json({
@@ -167,7 +170,7 @@ const updateProfile = async (req, res, next) => {
     const updatedUser = await User.findByIdAndUpdate(req.user.id, updates, {
       new: true,
       runValidators: true,
-    }).select("_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus walletBalance totalEarnings totalWithdrawn payoutInfo");
+    }).select("_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus walletBalance totalEarnings totalWithdrawn averageRating reviewCount sellerLevel payoutInfo");
 
     if (!updatedUser) {
       return res.status(404).json({
@@ -191,7 +194,7 @@ const updateProfile = async (req, res, next) => {
 const getMyProfile = async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id).select(
-      "_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus walletBalance totalEarnings totalWithdrawn payoutInfo"
+      "_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus walletBalance totalEarnings totalWithdrawn averageRating reviewCount sellerLevel payoutInfo"
     );
 
     if (!user) {
