@@ -4,6 +4,7 @@ const requireAuth = require("../middlewares/requireAuth");
 const {
   createOrder,
   getProviderDashboard,
+  getClientDashboard,
   listProviderOrders,
   listClientOrders,
   getProviderOrderDetail,
@@ -31,6 +32,7 @@ router.post("/", requireAuth, createOrder);
 router.get("/provider/dashboard", requireAuth, getProviderDashboard);
 router.get("/provider", requireAuth, listProviderOrders);
 router.get("/provider/:id", requireAuth, getProviderOrderDetail);
+router.get("/client/dashboard", requireAuth, getClientDashboard);
 router.get("/client", requireAuth, listClientOrders);
 router.get("/client/:id", requireAuth, getClientOrderDetail);
 router.patch("/provider/:id/accept", requireAuth, acceptProviderOrder);

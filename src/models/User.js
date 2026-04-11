@@ -151,6 +151,14 @@ const userSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    averageRating: {
+      type: Number,
+      default: 0,
+    },
+    reviewCount: {
+      type: Number,
+      default: 0,
+    },
     isVerified: {
       type: Boolean,
       default: false,

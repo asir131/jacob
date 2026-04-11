@@ -993,11 +993,23 @@ const listPublicServices = async (req, res, next) => {
         return item.distanceKm <= item.providerTravelRadiusKm;
       });
 
-    const totalItems = normalized.length;
+    const sorted = [...normalized].sort((left, right) => {
+      if (hasClientLocation) {
+        const leftDistance = typeof left.distanceKm === "number" ? left.distanceKm : Number.POSITIVE_INFINITY;
+        const rightDistance = typeof right.distanceKm === "number" ? right.distanceKm : Number.POSITIVE_INFINITY;
+        if (leftDistance !== rightDistance) return leftDistance - rightDistance;
+      }
+
+      const leftCreated = new Date(left.createdAt || 0).getTime();
+      const rightCreated = new Date(right.createdAt || 0).getTime();
+      return rightCreated - leftCreated;
+    });
+
+    const totalItems = sorted.length;
     const totalPages = Math.max(1, Math.ceil(totalItems / limit));
     const safePage = Math.min(page, totalPages);
     const start = (safePage - 1) * limit;
-    const paginatedItems = normalized.slice(start, start + limit);
+    const paginatedItems = sorted.slice(start, start + limit);
 
     return res.status(200).json({
       success: true,

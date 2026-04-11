@@ -161,6 +161,61 @@ const buildDashboardRequestCard = (order) => {
   };
 };
 
+const refreshProviderRatingStats = async (providerId) => {
+  if (!providerId) return;
+
+  const stats = await Order.aggregate([
+    {
+      $match: {
+        providerId: new mongoose.Types.ObjectId(String(providerId)),
+        status: "completed",
+        paymentStatus: "paid",
+        clientRating: { $ne: null },
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        averageRating: { $avg: "$clientRating" },
+        reviewCount: { $sum: 1 },
+      },
+    },
+  ]);
+
+  const averageRating = Number(stats?.[0]?.averageRating || 0);
+  const reviewCount = Number(stats?.[0]?.reviewCount || 0);
+
+  await User.findByIdAndUpdate(providerId, {
+    $set: {
+      averageRating,
+      reviewCount,
+    },
+  });
+
+  return {
+    averageRating,
+    reviewCount,
+  };
+};
+
+const formatOrderStatusLabel = (status = "") => {
+  const normalized = String(status || "").trim().toLowerCase();
+  const labels = {
+    pending: "Pending",
+    accepted: "In Progress",
+    accepting_delivery: "In Progress",
+    revision_requested: "Under Review",
+    under_revision: "Under Review",
+    after_sell_revision_requested: "Under Review",
+    under_after_sell_revision: "Under Review",
+    done_after_sell_revision: "Completed",
+    completed: "Completed",
+    declined: "Cancelled",
+  };
+
+  return labels[normalized] || "Pending";
+};
+
 const getProviderDashboard = async (req, res, next) => {
   try {
     if (!req.user || !["provider", "superAdmin"].includes(req.user.role)) {
@@ -179,11 +234,10 @@ const getProviderDashboard = async (req, res, next) => {
       pendingOrders,
       activeOrders,
       completedOrders,
-      ratingStats,
       monthlyEarnings,
       pendingRequestDocs,
     ] = await Promise.all([
-      User.findById(providerId).select("_id walletBalance totalEarnings totalWithdrawn").lean(),
+      User.findById(providerId).select("_id walletBalance totalEarnings totalWithdrawn averageRating reviewCount").lean(),
       Order.countDocuments({ providerId }),
       Order.countDocuments({ providerId, status: "pending" }),
       Order.countDocuments({
@@ -200,23 +254,6 @@ const getProviderDashboard = async (req, res, next) => {
         },
       }),
       Order.countDocuments({ providerId, status: "completed" }),
-      Order.aggregate([
-        {
-          $match: {
-            providerId: providerObjectId,
-            status: "completed",
-            paymentStatus: "paid",
-            clientRating: { $ne: null },
-          },
-        },
-        {
-          $group: {
-            _id: null,
-            averageRating: { $avg: "$clientRating" },
-            reviewCount: { $sum: 1 },
-          },
-        },
-      ]),
       Order.aggregate([
         {
           $match: {
@@ -245,8 +282,8 @@ const getProviderDashboard = async (req, res, next) => {
         .lean(),
     ]);
 
-    const averageRating = Number(ratingStats?.[0]?.averageRating || 0);
-    const reviewCount = Number(ratingStats?.[0]?.reviewCount || 0);
+    const averageRating = Number(providerProfile?.averageRating || 0);
+    const reviewCount = Number(providerProfile?.reviewCount || 0);
     const totalEarnings = Number(providerProfile?.totalEarnings || 0);
     const walletBalance = Number(providerProfile?.walletBalance || 0);
     const totalWithdrawn = Number(providerProfile?.totalWithdrawn || 0);
@@ -283,6 +320,150 @@ const getProviderDashboard = async (req, res, next) => {
       pendingRequests: pendingRequestDocs.map(buildDashboardRequestCard).filter(Boolean),
     },
   });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const getClientDashboard = async (req, res, next) => {
+  try {
+    if (!req.user || !["client", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only clients can view client dashboard data.",
+      });
+    }
+
+    const clientId = req.user.id;
+    const clientObjectId = new mongoose.Types.ObjectId(String(clientId));
+    const activeStatuses = [
+      "pending",
+      "accepted",
+      "accepting_delivery",
+      "revision_requested",
+      "under_revision",
+      "after_sell_revision_requested",
+      "under_after_sell_revision",
+    ];
+    const underReviewStatuses = [
+      "revision_requested",
+      "under_revision",
+      "after_sell_revision_requested",
+      "under_after_sell_revision",
+    ];
+    const inProgressStatuses = ["accepted", "accepting_delivery"];
+
+    const [
+      totalOrders,
+      pendingOrders,
+      inProgressOrders,
+      underReviewOrders,
+      completedOrders,
+      recentOrderDocs,
+      unreadMessageStats,
+    ] = await Promise.all([
+      Order.countDocuments({ clientId }),
+      Order.countDocuments({ clientId, status: "pending" }),
+      Order.countDocuments({ clientId, status: { $in: inProgressStatuses } }),
+      Order.countDocuments({ clientId, status: { $in: underReviewStatuses } }),
+      Order.countDocuments({ clientId, status: "completed" }),
+      Order.find({ clientId })
+        .populate("gigId", "_id title categoryName images")
+        .populate("providerId", "_id firstName lastName avatar")
+        .sort({ createdAt: -1 })
+        .limit(3)
+        .lean(),
+      Message.aggregate([
+        {
+          $match: {
+            receiverId: clientObjectId,
+            readAt: null,
+          },
+        },
+        {
+          $lookup: {
+            from: "users",
+            localField: "senderId",
+            foreignField: "_id",
+            as: "sender",
+          },
+        },
+        { $unwind: "$sender" },
+        {
+          $match: {
+            "sender.role": "provider",
+          },
+        },
+        {
+          $group: {
+            _id: "$conversationId",
+          },
+        },
+        {
+          $count: "count",
+        },
+      ]),
+    ]);
+
+    const activeOrders = pendingOrders + inProgressOrders + underReviewOrders;
+    const completedRate = totalOrders > 0 ? Number(((completedOrders / totalOrders) * 100).toFixed(1)) : 0;
+    const inboxCount = Number(unreadMessageStats?.[0]?.count || 0);
+
+    const recentOrders = recentOrderDocs.map((order) => {
+      const summary = buildOrderSummary(order);
+      const providerName = summary?.provider?.name || "Provider";
+      const providerAvatar = summary?.provider?.avatar || "";
+      const packagePrice = Number(summary?.packagePrice || 0);
+      const totalAmount = packagePrice > 0 ? packagePrice : Number(summary?.paymentAmount || 0);
+      const timeLabel = summary?.scheduledDate
+        ? new Date(summary.scheduledDate).toLocaleDateString(undefined, {
+            month: "short",
+            day: "numeric",
+            year: "numeric",
+          })
+        : "";
+
+      return {
+        id: summary?.id || String(order._id),
+        orderNumber: summary?.orderNumber || "",
+        orderName: summary?.orderName || "Service order",
+        categoryName: summary?.categoryName || "General",
+        status: summary?.status || "pending",
+        statusLabel: formatOrderStatusLabel(summary?.status),
+        amount: totalAmount,
+        provider: {
+          id: summary?.provider?.id || "",
+          name: providerName,
+          avatar: providerAvatar,
+        },
+        location: String(summary?.serviceAddress || summary?.client?.address || "Location not set"),
+        scheduledDate: summary?.scheduledDate || null,
+        scheduledTime: summary?.scheduledTime || "",
+        scheduledLabel: timeLabel,
+        conversationId: summary?.conversationId || null,
+        paymentStatus: summary?.paymentStatus || "unpaid",
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Client dashboard summary fetched successfully.",
+      data: {
+        orders: {
+          totalOrders,
+          activeOrders,
+          pendingOrders,
+          inProgressOrders,
+          underReviewOrders,
+          completedOrders,
+          completionRate: completedRate,
+        },
+        inbox: {
+          unreadMessages: inboxCount,
+        },
+        recentOrders,
+      },
+    });
   } catch (error) {
     return next(error);
   }
@@ -328,6 +509,7 @@ const submitClientOrderReview = async (req, res, next) => {
     order.clientRating = rating;
     order.clientReview = review;
     await order.save();
+    await refreshProviderRatingStats(order.providerId);
 
     emitToUser(String(order.providerId), "notification:new", {
       id: `NTF-${Date.now()}`,
@@ -1590,6 +1772,10 @@ const confirmClientCheckoutPayment = async (req, res, next) => {
       clientReview,
     });
 
+    if (Number.isFinite(Number(clientRating)) && Number(clientRating) > 0) {
+      await refreshProviderRatingStats(order.providerId);
+    }
+
     return res.status(200).json({
       success: true,
       message: "Payment confirmed and order completed.",
@@ -1730,6 +1916,7 @@ module.exports = {
   createOrder,
   listProviderOrders,
   getProviderDashboard,
+  getClientDashboard,
   listClientOrders,
   getProviderOrderDetail,
   getClientOrderDetail,
