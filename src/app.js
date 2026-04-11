@@ -6,6 +6,8 @@ const categoryRoutes = require("./routes/categoryRoutes");
 const gigRoutes = require("./routes/gigRoutes");
 const profileRoutes = require("./routes/profileRoutes");
 const orderRoutes = require("./routes/orderRoutes");
+const withdrawalRoutes = require("./routes/withdrawalRoutes");
+const { handleStripeWebhook } = require("./controllers/orderController");
 const chatRoutes = require("./routes/chatRoutes");
 const errorHandler = require("./middlewares/errorHandler");
 
@@ -21,6 +23,8 @@ app.use(
     credentials: true,
   })
 );
+
+app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), handleStripeWebhook);
 app.use(express.json());
 
 app.get("/api/health", (req, res) => {
@@ -36,6 +40,7 @@ app.use("/api/categories", categoryRoutes);
 app.use("/api/gigs", gigRoutes);
 app.use("/api/profile", profileRoutes);
 app.use("/api/orders", orderRoutes);
+app.use("/api/withdrawals", withdrawalRoutes);
 app.use("/api/chats", chatRoutes);
 
 app.use(errorHandler);

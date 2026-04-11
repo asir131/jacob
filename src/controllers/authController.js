@@ -73,6 +73,9 @@ const buildAuthPayload = (user, accessToken, refreshToken) => {
       serviceLocationLng:
         typeof user.serviceLocationLng === "number" ? user.serviceLocationLng : null,
       payoutVerificationStatus: user.payoutVerificationStatus || "unverified",
+      walletBalance: Number(user.walletBalance) || 0,
+      totalEarnings: Number(user.totalEarnings) || 0,
+      totalWithdrawn: Number(user.totalWithdrawn) || 0,
       payoutInfo: {
         accountHolderName: user?.payoutInfo?.accountHolderName || "",
         bankAccountNumber: user?.payoutInfo?.bankAccountNumber || "",

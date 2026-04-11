@@ -3,6 +3,7 @@ const multer = require("multer");
 const requireAuth = require("../middlewares/requireAuth");
 const {
   createOrder,
+  getProviderDashboard,
   listProviderOrders,
   listClientOrders,
   getProviderOrderDetail,
@@ -14,6 +15,9 @@ const {
   respondProviderRevision,
   cancelClientRevisionRequest,
   sendClientResolutionMessage,
+  createClientCheckoutSession,
+  confirmClientCheckoutPayment,
+  submitClientOrderReview,
   finalizeClientOrder,
 } = require("../controllers/orderController");
 
@@ -24,6 +28,7 @@ const upload = multer({
 });
 
 router.post("/", requireAuth, createOrder);
+router.get("/provider/dashboard", requireAuth, getProviderDashboard);
 router.get("/provider", requireAuth, listProviderOrders);
 router.get("/provider/:id", requireAuth, getProviderOrderDetail);
 router.get("/client", requireAuth, listClientOrders);
@@ -35,6 +40,9 @@ router.patch("/provider/:id/deliver", requireAuth, upload.array("deliveryImages"
 router.patch("/client/:id/request-revision", requireAuth, requestClientRevision);
 router.patch("/client/:id/cancel-revision", requireAuth, cancelClientRevisionRequest);
 router.post("/client/:id/resolution-message", requireAuth, sendClientResolutionMessage);
+router.post("/client/:id/stripe-checkout", requireAuth, createClientCheckoutSession);
+router.post("/client/:id/stripe-confirm", requireAuth, confirmClientCheckoutPayment);
+router.post("/client/:id/review", requireAuth, submitClientOrderReview);
 router.patch("/client/:id/finalize", requireAuth, finalizeClientOrder);
 
 module.exports = router;

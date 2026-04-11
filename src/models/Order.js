@@ -62,6 +62,11 @@ const orderSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    clientAddressSnapshot: {
+      type: String,
+      default: "",
+      trim: true,
+    },
     specialInstructions: {
       type: String,
       default: "",
@@ -112,6 +117,56 @@ const orderSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    paymentStatus: {
+      type: String,
+      enum: ["unpaid", "pending", "paid", "failed"],
+      default: "unpaid",
+    },
+    paymentProvider: {
+      type: String,
+      default: "stripe",
+      trim: true,
+    },
+    stripeCheckoutSessionId: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    stripePaymentIntentId: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    paymentCurrency: {
+      type: String,
+      default: "usd",
+      trim: true,
+    },
+    paymentAmount: {
+      type: Number,
+      default: 0,
+    },
+    platformFeeAmount: {
+      type: Number,
+      default: 0,
+    },
+    providerEarningsAmount: {
+      type: Number,
+      default: 0,
+    },
+    paidAt: {
+      type: Date,
+      default: null,
+    },
+    clientRating: {
+      type: Number,
+      default: null,
+    },
+    clientReview: {
+      type: String,
+      default: "",
+      trim: true,
+    },
     status: {
       type: String,
       enum: [
@@ -121,6 +176,9 @@ const orderSchema = new mongoose.Schema(
         "accepting_delivery",
         "revision_requested",
         "under_revision",
+        "after_sell_revision_requested",
+        "under_after_sell_revision",
+        "done_after_sell_revision",
         "completed",
       ],
       default: "pending",

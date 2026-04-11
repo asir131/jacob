@@ -29,6 +29,9 @@ const serializeUser = (userDoc) => {
     serviceLocationLat: typeof userDoc.serviceLocationLat === "number" ? userDoc.serviceLocationLat : null,
     serviceLocationLng: typeof userDoc.serviceLocationLng === "number" ? userDoc.serviceLocationLng : null,
     payoutVerificationStatus: userDoc.payoutVerificationStatus || PAYOUT_STATUS.UNVERIFIED,
+    walletBalance: Number(userDoc.walletBalance) || 0,
+    totalEarnings: Number(userDoc.totalEarnings) || 0,
+    totalWithdrawn: Number(userDoc.totalWithdrawn) || 0,
     payoutInfo: {
       accountHolderName: userDoc?.payoutInfo?.accountHolderName || "",
       bankAccountNumber: userDoc?.payoutInfo?.bankAccountNumber || "",
@@ -83,7 +86,7 @@ const uploadAvatar = async (req, res, next) => {
       req.user.id,
       { avatar: result.secure_url },
       { new: true }
-    ).select("_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus payoutInfo");
+    ).select("_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus walletBalance totalEarnings totalWithdrawn payoutInfo");
 
     if (!updatedUser) {
       return res.status(404).json({
@@ -164,7 +167,7 @@ const updateProfile = async (req, res, next) => {
     const updatedUser = await User.findByIdAndUpdate(req.user.id, updates, {
       new: true,
       runValidators: true,
-    }).select("_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus payoutInfo");
+    }).select("_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus walletBalance totalEarnings totalWithdrawn payoutInfo");
 
     if (!updatedUser) {
       return res.status(404).json({
@@ -188,7 +191,7 @@ const updateProfile = async (req, res, next) => {
 const getMyProfile = async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id).select(
-      "_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus payoutInfo"
+      "_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus walletBalance totalEarnings totalWithdrawn payoutInfo"
     );
 
     if (!user) {
@@ -340,7 +343,7 @@ const listProviderVerifications = async (req, res, next) => {
     }
 
     const providers = await User.find(query)
-      .select("_id firstName lastName email avatar payoutVerificationStatus payoutInfo createdAt updatedAt")
+      .select("_id firstName lastName email avatar payoutVerificationStatus walletBalance totalEarnings totalWithdrawn payoutInfo createdAt updatedAt")
       .sort({ "payoutInfo.submittedAt": -1, updatedAt: -1 })
       .lean();
 
@@ -382,7 +385,7 @@ const getProviderVerificationDetails = async (req, res, next) => {
     const { providerId } = req.params;
 
     const provider = await User.findOne({ _id: providerId, role: "provider" })
-      .select("_id firstName lastName email avatar payoutVerificationStatus payoutInfo createdAt updatedAt")
+      .select("_id firstName lastName email avatar payoutVerificationStatus walletBalance totalEarnings totalWithdrawn payoutInfo createdAt updatedAt")
       .populate("payoutInfo.reviewedBy", "firstName lastName email role")
       .lean();
 

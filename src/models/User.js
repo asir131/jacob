@@ -139,6 +139,18 @@ const userSchema = new mongoose.Schema(
       enum: ["unverified", "pending", "verified", "rejected"],
       default: "unverified",
     },
+    walletBalance: {
+      type: Number,
+      default: 0,
+    },
+    totalEarnings: {
+      type: Number,
+      default: 0,
+    },
+    totalWithdrawn: {
+      type: Number,
+      default: 0,
+    },
     isVerified: {
       type: Boolean,
       default: false,

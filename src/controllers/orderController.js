@@ -1,10 +1,16 @@
+const mongoose = require("mongoose");
 const cloudinary = require("../config/cloudinary");
+const crypto = require("crypto");
 const Gig = require("../models/Gig");
 const Order = require("../models/Order");
+const User = require("../models/User");
 const Message = require("../models/Message");
 const Conversation = require("../models/Conversation");
 const { emitToUser } = require("../socket");
 const { ensureConversationForOrder } = require("./chatController");
+
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
+const APP_URL = process.env.CLIENT_APP_URL || process.env.FRONTEND_URL || "http://localhost:3000";
 
 const uploadBufferToCloudinary = (buffer, folder) => {
   return new Promise((resolve, reject) => {
@@ -37,37 +43,76 @@ const parsePage = (value, fallback) => {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 };
 
+const formatAddress = (area = "", district = "", zip = "") =>
+  [area || "Area unavailable", district || "District unavailable", zip || "ZIP N/A"].join(", ");
+
+const resolveAddressFromCoordinates = async (lat, lng) => {
+  if (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lng))) return "";
+
+  try {
+    const response = await fetch(
+      `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`
+    );
+    if (!response.ok) return "";
+
+    const data = await response.json();
+    const formatted = formatAddress(
+      String(data?.locality || data?.city || "").trim(),
+      String(data?.principalSubdivision || "").trim(),
+      String(data?.postcode || "").trim()
+    );
+
+    return formatted === "Area unavailable, District unavailable, ZIP N/A" ? "" : formatted;
+  } catch {
+    return "";
+  }
+};
+
+
 const buildOrderSummary = (order) => {
   if (!order) return null;
   const client = order.clientId || {};
   const provider = order.providerId || {};
   const gig = order.gigId || {};
 
-  return {
-    id: order._id,
-    orderNumber: order.orderNumber,
-    conversationId: order.conversationId || null,
-    orderName: gig.title || "Service order",
+    return {
+      id: order._id,
+      orderNumber: order.orderNumber,
+      conversationId: order.conversationId || null,
+      orderName: gig.title || "Service order",
     categoryName: String(order.categoryName || gig.categoryName || "").trim(),
-    status: order.status,
-    packageName: order.packageName,
-    packageTitle: order.packageTitle,
+      status: order.status,
+      revisionType:
+        order.status === "after_sell_revision_requested" || order.status === "under_after_sell_revision"
+          ? "after_sell"
+          : "delivery",
+      packageName: order.packageName,
+      packageTitle: order.packageTitle,
     packagePrice: Number(order.packagePrice) || 0,
     scheduledDate: order.scheduledDate,
     scheduledTime: order.scheduledTime || "",
     serviceAddress: order.serviceAddress || "",
     specialInstructions: order.specialInstructions || "",
-    deliveryNote: order.deliveryNote || "",
-    deliveryImages: Array.isArray(order.deliveryImages) ? order.deliveryImages : [],
-    revisionRequestNote: order.revisionRequestNote || "",
-    revisionResponseNote: order.revisionResponseNote || "",
-    revisionRequestedAt: order.revisionRequestedAt || null,
-    revisionRespondedAt: order.revisionRespondedAt || null,
-    createdAt: order.createdAt,
+      deliveryNote: order.deliveryNote || "",
+      deliveryImages: Array.isArray(order.deliveryImages) ? order.deliveryImages : [],
+      revisionRequestNote: order.revisionRequestNote || "",
+      revisionResponseNote: order.revisionResponseNote || "",
+      clientRating: Number.isFinite(Number(order.clientRating)) ? Number(order.clientRating) : null,
+      clientReview: order.clientReview || "",
+      revisionRequestedAt: order.revisionRequestedAt || null,
+      revisionRespondedAt: order.revisionRespondedAt || null,
+      createdAt: order.createdAt,
     requirementSubmittedAt: order.requirementSubmittedAt || order.createdAt || null,
     orderStartedAt: order.orderStartedAt || null,
     deliveryPendingAt: order.deliveryPendingAt || null,
     completedAt: order.completedAt || null,
+    paymentStatus: order.paymentStatus || "unpaid",
+    paymentProvider: order.paymentProvider || "stripe",
+    paymentCurrency: order.paymentCurrency || "usd",
+    paymentAmount: Number(order.paymentAmount) || Number(order.packagePrice) || 0,
+    platformFeeAmount: Number(order.platformFeeAmount) || 0,
+    providerEarningsAmount: Number(order.providerEarningsAmount) || 0,
+    paidAt: order.paidAt || null,
     client: {
       id: client._id || "",
       name: `${client.firstName || ""} ${client.lastName || ""}`.trim() || "Client",
@@ -86,6 +131,8 @@ const buildOrderSummary = (order) => {
       address: provider.address || "",
       avatar: provider.avatar || "",
       completedOrders: Number(provider.completedOrders) || 0,
+      walletBalance: Number(provider.walletBalance) || 0,
+      totalEarnings: Number(provider.totalEarnings) || 0,
     },
     gig: {
       id: gig._id || "",
@@ -93,7 +140,219 @@ const buildOrderSummary = (order) => {
       categoryName: gig.categoryName || "",
       images: Array.isArray(gig.images) ? gig.images : [],
     },
+    };
   };
+
+const buildDashboardRequestCard = (order) => {
+  const summary = buildOrderSummary(order);
+  if (!summary) return null;
+
+  return {
+    id: summary.id,
+    orderNumber: summary.orderNumber,
+    title: summary.orderName,
+    category: summary.categoryName || "General",
+    customer: summary.client?.name || "Client",
+    address: String(order?.clientAddressSnapshot || summary.client?.address || "Location not set"),
+    time: summary.createdAt || new Date().toISOString(),
+    avatar: summary.client?.avatar || "",
+    clientId: summary.client?.id || "",
+    status: summary.status,
+  };
+};
+
+const getProviderDashboard = async (req, res, next) => {
+  try {
+    if (!req.user || !["provider", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only providers can view provider dashboard data.",
+      });
+    }
+
+    const providerId = req.user.id;
+    const providerObjectId = new mongoose.Types.ObjectId(String(providerId));
+
+    const [
+      providerProfile,
+      totalOrders,
+      pendingOrders,
+      activeOrders,
+      completedOrders,
+      ratingStats,
+      monthlyEarnings,
+      pendingRequestDocs,
+    ] = await Promise.all([
+      User.findById(providerId).select("_id walletBalance totalEarnings totalWithdrawn").lean(),
+      Order.countDocuments({ providerId }),
+      Order.countDocuments({ providerId, status: "pending" }),
+      Order.countDocuments({
+        providerId,
+        status: {
+          $in: [
+            "accepted",
+            "accepting_delivery",
+            "revision_requested",
+            "under_revision",
+            "after_sell_revision_requested",
+            "under_after_sell_revision",
+          ],
+        },
+      }),
+      Order.countDocuments({ providerId, status: "completed" }),
+      Order.aggregate([
+        {
+          $match: {
+            providerId: providerObjectId,
+            status: "completed",
+            paymentStatus: "paid",
+            clientRating: { $ne: null },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            averageRating: { $avg: "$clientRating" },
+            reviewCount: { $sum: 1 },
+          },
+        },
+      ]),
+      Order.aggregate([
+        {
+          $match: {
+            providerId: providerObjectId,
+            status: "completed",
+            paymentStatus: "paid",
+            paidAt: {
+              $gte: new Date(new Date().getFullYear(), 0, 1),
+              $lt: new Date(new Date().getFullYear() + 1, 0, 1),
+            },
+          },
+        },
+        {
+          $group: {
+            _id: { $month: "$paidAt" },
+            earnings: { $sum: "$providerEarningsAmount" },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+      Order.find({ providerId, status: "pending" })
+        .populate("gigId", "_id title categoryName")
+        .populate("clientId", "_id firstName lastName avatar address locationLat locationLng")
+        .sort({ createdAt: -1 })
+        .limit(2)
+        .lean(),
+    ]);
+
+    const averageRating = Number(ratingStats?.[0]?.averageRating || 0);
+    const reviewCount = Number(ratingStats?.[0]?.reviewCount || 0);
+    const totalEarnings = Number(providerProfile?.totalEarnings || 0);
+    const walletBalance = Number(providerProfile?.walletBalance || 0);
+    const totalWithdrawn = Number(providerProfile?.totalWithdrawn || 0);
+    const completionRate = totalOrders > 0 ? Number(((completedOrders / totalOrders) * 100).toFixed(1)) : 0;
+
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const earningsMap = new Map(monthlyEarnings.map((entry) => [Number(entry._id), Number(entry.earnings || 0)]));
+    const earningsAnalytics = monthNames.map((name, index) => ({
+      name,
+      earnings: earningsMap.get(index + 1) || 0,
+    }));
+
+    return res.status(200).json({
+      success: true,
+      message: "Provider dashboard summary fetched successfully.",
+      data: {
+        revenue: {
+          totalEarnings,
+          walletBalance,
+          totalWithdrawn,
+        },
+        orders: {
+          totalOrders,
+          pendingOrders,
+          activeOrders,
+          completedOrders,
+          completionRate,
+        },
+        ratings: {
+          averageRating,
+          reviewCount,
+        },
+        earningsAnalytics,
+      pendingRequests: pendingRequestDocs.map(buildDashboardRequestCard).filter(Boolean),
+    },
+  });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const submitClientOrderReview = async (req, res, next) => {
+  try {
+    if (!req.user || !["client", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only clients can submit order reviews.",
+      });
+    }
+
+    const rating = Number(req.body.rating);
+    const review = String(req.body.review || "").trim();
+    if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
+      return res.status(400).json({
+        success: false,
+        message: "Please select a rating between 1 and 5.",
+      });
+    }
+
+    const order = await Order.findOne({
+      _id: req.params.id,
+      clientId: req.user.id,
+    }).populate("gigId", "_id title");
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found.",
+      });
+    }
+
+    if (order.status !== "completed" || order.paymentStatus !== "paid") {
+      return res.status(400).json({
+        success: false,
+        message: "You can only review after payment is completed.",
+      });
+    }
+
+    order.clientRating = rating;
+    order.clientReview = review;
+    await order.save();
+
+    emitToUser(String(order.providerId), "notification:new", {
+      id: `NTF-${Date.now()}`,
+      type: "success",
+      title: "New client review",
+      description: `You received a ${rating}-star review for ${order.gigId?.title || "your order"}.`,
+      data: {
+        notificationType: "order_review_submitted",
+        orderId: order._id.toString(),
+        targetPath: `/provider/orders/${order._id.toString()}`,
+      },
+      unread: true,
+      createdAt: new Date().toISOString(),
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Review submitted successfully.",
+      data: {
+        order: buildOrderSummary(order),
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
 };
 
 const createOrderNumber = () => {
@@ -120,6 +379,132 @@ const normalizeMessage = (message) => ({
   createdAt: message.createdAt,
   readAt: message.readAt || null,
 });
+
+const formatStripeFormData = (payload = {}) => {
+  const formData = new URLSearchParams();
+  Object.entries(payload).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === "") return;
+    formData.append(key, String(value));
+  });
+  return formData;
+};
+
+const stripeRequest = async (path, payload) => {
+  if (!STRIPE_SECRET_KEY) {
+    throw new Error("Stripe secret key is not configured.");
+  }
+
+  const response = await fetch(`https://api.stripe.com${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${STRIPE_SECRET_KEY}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: formatStripeFormData(payload),
+  });
+
+  const data = await response.json();
+  if (!response.ok) {
+    const message = data?.error?.message || "Stripe request failed.";
+    throw new Error(message);
+  }
+  return data;
+};
+
+const stripeGetRequest = async (path) => {
+  if (!STRIPE_SECRET_KEY) {
+    throw new Error("Stripe secret key is not configured.");
+  }
+
+  const response = await fetch(`https://api.stripe.com${path}`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${STRIPE_SECRET_KEY}`,
+    },
+  });
+
+  const data = await response.json();
+  if (!response.ok) {
+    const message = data?.error?.message || "Stripe request failed.";
+    throw new Error(message);
+  }
+  return data;
+};
+
+const finalizePaidOrder = async ({ order, session, clientRating = null, clientReview = "" }) => {
+  if (!order) return null;
+
+  const alreadyPaid = order.paymentStatus === "paid" && order.status === "completed";
+  const amount = Number(order.packagePrice) || Number(order.paymentAmount) || 0;
+  const platformFeeAmount = Number((amount * 0.05).toFixed(2));
+  const providerEarningsAmount = Number((amount - platformFeeAmount).toFixed(2));
+
+  if (!alreadyPaid) {
+    order.paymentStatus = "paid";
+    order.paymentProvider = "stripe";
+    order.stripeCheckoutSessionId = session?.id || order.stripeCheckoutSessionId || "";
+    order.stripePaymentIntentId = String(session?.payment_intent?.id || session?.payment_intent || order.stripePaymentIntentId || "");
+    order.paymentCurrency = String(session?.currency || order.paymentCurrency || "usd");
+    order.paymentAmount = amount;
+    order.platformFeeAmount = platformFeeAmount;
+    order.providerEarningsAmount = providerEarningsAmount;
+    order.paidAt = new Date();
+    order.status = "completed";
+    order.completedAt = new Date();
+    if (Number.isFinite(Number(clientRating)) && Number(clientRating) > 0) {
+      order.clientRating = Number(clientRating);
+    }
+    if (String(clientReview || "").trim()) {
+      order.clientReview = String(clientReview).trim();
+    }
+    ensureOrderNumber(order);
+    await order.save();
+
+    await User.findByIdAndUpdate(order.providerId, {
+      $inc: {
+        walletBalance: providerEarningsAmount,
+        totalEarnings: providerEarningsAmount,
+      },
+    });
+
+    emitToUser(String(order.providerId), "notification:new", {
+      id: `NTF-${Date.now()}`,
+      type: "success",
+      title: "Payment received",
+      description: `Client paid for ${order.gigId?.title || "your order"}. Provider earnings have been credited.`,
+      data: {
+        notificationType: "order_paid",
+        orderId: order._id.toString(),
+        providerEarningsAmount,
+        platformFeeAmount,
+        targetPath: `/provider/orders/${order._id.toString()}`,
+      },
+      unread: true,
+      createdAt: new Date().toISOString(),
+    });
+
+    emitToUser(String(order.clientId), "notification:new", {
+      id: `NTF-${Date.now()}-client`,
+      type: "success",
+      title: "Payment completed",
+      description: `Your payment for ${order.gigId?.title || "the order"} was successful.`,
+      data: {
+        notificationType: "order_payment_completed",
+        orderId: order._id.toString(),
+        targetPath: `/client/orders/${order.orderNumber || order._id.toString()}`,
+      },
+      unread: true,
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  return {
+    order,
+    providerEarningsAmount,
+    platformFeeAmount,
+    alreadyPaid,
+  };
+};
 
 const sendSystemOrderMessage = async ({ order, senderId, receiverId, text }) => {
   if (!order || !senderId || !receiverId || !String(text || "").trim()) return null;
@@ -222,6 +607,11 @@ const createOrder = async (req, res, next) => {
       });
     }
 
+    const clientProfile = await User.findById(req.user.id).select("_id address locationLat locationLng").lean();
+    const clientAddressSnapshot =
+      String(clientProfile?.address || "").trim() ||
+      (await resolveAddressFromCoordinates(clientProfile?.locationLat, clientProfile?.locationLng));
+
     const order = await Order.create({
       orderNumber: createOrderNumber(),
       gigId: gig._id,
@@ -234,9 +624,14 @@ const createOrder = async (req, res, next) => {
       scheduledDate: new Date(scheduledDate),
       scheduledTime: String(scheduledTime).trim(),
       serviceAddress: String(serviceAddress).trim(),
+      clientAddressSnapshot,
       specialInstructions: String(specialInstructions || "").trim(),
       requirementSubmittedAt: new Date(),
       status: "pending",
+      paymentStatus: "unpaid",
+      paymentProvider: "stripe",
+      paymentAmount: Number(packagePrice) || 0,
+      paymentCurrency: "usd",
     });
 
     emitToUser(String(gig.providerId), "notification:new", {
@@ -289,13 +684,15 @@ const listProviderOrders = async (req, res, next) => {
       providerId: req.user.id,
     };
 
-    if (status && status !== "all") {
-      if (status === "request_revision") {
-        query.status = "revision_requested";
-      } else {
-        query.status = status;
+      if (status && status !== "all") {
+        if (status === "request_revision") {
+          query.status = { $in: ["revision_requested", "after_sell_revision_requested"] };
+        } else if (status === "under_revision") {
+          query.status = { $in: ["under_revision", "under_after_sell_revision"] };
+        } else {
+          query.status = status;
+        }
       }
-    }
 
     if (search) {
       query.$or = [
@@ -358,15 +755,19 @@ const listClientOrders = async (req, res, next) => {
       clientId: req.user.id,
     };
 
-    if (status && status !== "all") {
-      if (status === "payment_pending") {
-        query.status = "accepting_delivery";
-      } else if (status === "cancelled") {
-        query.status = "declined";
-      } else {
-        query.status = status;
+      if (status && status !== "all") {
+        if (status === "payment_pending") {
+          query.status = "accepting_delivery";
+        } else if (status === "cancelled") {
+          query.status = "declined";
+        } else if (status === "request_revision") {
+          query.status = { $in: ["revision_requested", "after_sell_revision_requested"] };
+        } else if (status === "under_revision") {
+          query.status = { $in: ["under_revision", "under_after_sell_revision"] };
+        } else {
+          query.status = status;
+        }
       }
-    }
 
     if (search) {
       query.$or = [
@@ -668,12 +1069,12 @@ const submitProviderDelivery = async (req, res, next) => {
       });
     }
 
-    if (!["accepted", "accepting_delivery", "under_revision"].includes(order.status)) {
-      return res.status(400).json({
-        success: false,
-        message: "This order is not in a deliverable state.",
-      });
-    }
+      if (!["accepted", "accepting_delivery", "under_revision", "under_after_sell_revision"].includes(order.status)) {
+        return res.status(400).json({
+          success: false,
+          message: "This order is not in a deliverable state.",
+        });
+      }
 
     const incomingDeliveryNote = String(req.body.deliveryNote || "").trim();
     const deliveryNote = incomingDeliveryNote || String(order.deliveryNote || "").trim();
@@ -692,24 +1093,29 @@ const submitProviderDelivery = async (req, res, next) => {
           ? order.deliveryImages
           : [];
 
-    order.deliveryNote = deliveryNote;
-    order.deliveryImages = nextImages;
-    order.deliveryPendingAt = new Date();
-    order.status = "accepting_delivery";
-    order.revisionResponseNote = "";
-    ensureOrderNumber(order);
-    await order.save();
+      order.deliveryNote = deliveryNote;
+      order.deliveryImages = nextImages;
+      order.deliveryPendingAt = new Date();
+      order.status = order.status === "under_after_sell_revision" ? "completed" : "accepting_delivery";
+      order.revisionResponseNote = "";
+      if (order.status === "completed") {
+        order.completedAt = new Date();
+      }
+      ensureOrderNumber(order);
+      await order.save();
 
-    emitToUser(String(order.clientId), "notification:new", {
-      id: `NTF-${Date.now()}`,
-      type: "system",
-      title: "Delivery submitted",
-      description: `Provider submitted delivery for ${order.gigId?.title || "your order"}.`,
-      data: {
-        notificationType: "order_delivery_submitted",
-        orderId: order._id.toString(),
-        targetPath: `/client/orders/${order._id.toString()}`,
-      },
+      emitToUser(String(order.clientId), "notification:new", {
+        id: `NTF-${Date.now()}`,
+        type: "system",
+        title: order.status === "completed" ? "After-sale revision completed" : "Delivery submitted",
+        description: order.status === "completed"
+          ? `Provider completed the after-sale revision for ${order.gigId?.title || "your order"}.`
+          : `Provider submitted delivery for ${order.gigId?.title || "your order"}.`,
+        data: {
+          notificationType: order.status === "completed" ? "order_after_sell_revision_completed" : "order_delivery_submitted",
+          orderId: order._id.toString(),
+          targetPath: `/client/orders/${order._id.toString()}`,
+        },
       unread: true,
       createdAt: new Date().toISOString(),
     });
@@ -747,12 +1153,15 @@ const requestClientRevision = async (req, res, next) => {
       });
     }
 
-    if (order.status !== "accepting_delivery") {
-      return res.status(400).json({
-        success: false,
-        message: "Revision can only be requested after delivery submission.",
-      });
-    }
+      const isAfterSellRevision = order.status === "completed" && order.paymentStatus === "paid";
+      const isDeliveryRevision = order.status === "accepting_delivery";
+
+      if (!isAfterSellRevision && !isDeliveryRevision) {
+        return res.status(400).json({
+          success: false,
+          message: "Revision can only be requested after delivery submission or after payment completion.",
+        });
+      }
 
     const note = String(req.body.note || "").trim();
     if (!note) {
@@ -762,30 +1171,30 @@ const requestClientRevision = async (req, res, next) => {
       });
     }
 
-    order.status = "revision_requested";
-    order.revisionRequestNote = note;
-    order.revisionRequestedAt = new Date();
-    order.revisionResponseNote = "";
-    order.revisionRespondedAt = null;
-    await order.save();
+      order.status = isAfterSellRevision ? "after_sell_revision_requested" : "revision_requested";
+      order.revisionRequestNote = note;
+      order.revisionRequestedAt = new Date();
+      order.revisionResponseNote = "";
+      order.revisionRespondedAt = null;
+      await order.save();
 
-    const chat = await sendSystemOrderMessage({
-      order,
-      senderId: order.clientId,
-      receiverId: order.providerId,
-      text: `Revision requested: ${note}`,
-    });
+      const chat = await sendSystemOrderMessage({
+        order,
+        senderId: order.clientId,
+        receiverId: order.providerId,
+        text: `${isAfterSellRevision ? "After-sale revision requested" : "Revision requested"}: ${note}`,
+      });
 
     emitToUser(String(order.providerId), "notification:new", {
       id: `NTF-${Date.now()}`,
       type: "warning",
-      title: "Client requested revision",
-      description: `Revision requested for ${order.gigId?.title || "an order"}.`,
-      data: {
-        notificationType: "order_revision_requested",
-        orderId: order._id.toString(),
-        targetPath: `/provider/orders/${order._id.toString()}`,
-        conversationId: chat?.conversationId || "",
+        title: isAfterSellRevision ? "Client requested after-sale revision" : "Client requested revision",
+        description: `Revision requested for ${order.gigId?.title || "an order"}.`,
+        data: {
+          notificationType: isAfterSellRevision ? "order_after_sell_revision_requested" : "order_revision_requested",
+          orderId: order._id.toString(),
+          targetPath: `/provider/orders/${order._id.toString()}`,
+          conversationId: chat?.conversationId || "",
       },
       unread: true,
       createdAt: new Date().toISOString(),
@@ -822,12 +1231,12 @@ const respondProviderRevision = async (req, res, next) => {
       });
     }
 
-    if (order.status !== "revision_requested") {
-      return res.status(400).json({
-        success: false,
-        message: "No revision request available for this order.",
-      });
-    }
+      if (!["revision_requested", "after_sell_revision_requested"].includes(order.status)) {
+        return res.status(400).json({
+          success: false,
+          message: "No revision request available for this order.",
+        });
+      }
 
     const action = String(req.body.action || "").trim().toLowerCase();
     const note = String(req.body.note || "").trim();
@@ -838,21 +1247,23 @@ const respondProviderRevision = async (req, res, next) => {
       });
     }
 
-    if (action === "accept") {
-      order.status = "under_revision";
-      order.revisionResponseNote = note || "Provider accepted revision request.";
-      order.revisionRespondedAt = new Date();
-    } else {
-      order.status = "accepting_delivery";
-      order.revisionResponseNote = note || "Provider declined revision request.";
-      order.revisionRespondedAt = new Date();
-    }
+      const isAfterSellRevision = order.status === "after_sell_revision_requested";
+
+      if (action === "accept") {
+        order.status = isAfterSellRevision ? "under_after_sell_revision" : "under_revision";
+        order.revisionResponseNote = note || "Provider accepted revision request.";
+        order.revisionRespondedAt = new Date();
+      } else {
+        order.status = isAfterSellRevision ? "completed" : "accepting_delivery";
+        order.revisionResponseNote = note || "Provider declined revision request.";
+        order.revisionRespondedAt = new Date();
+      }
     await order.save();
 
-    const text =
-      action === "accept"
-        ? `Provider accepted revision request.${note ? ` Note: ${note}` : ""}`
-        : `Provider declined revision request.${note ? ` Note: ${note}` : ""}`;
+      const text =
+        action === "accept"
+          ? `${isAfterSellRevision ? "Provider accepted after-sale revision request." : "Provider accepted revision request."}${note ? ` Note: ${note}` : ""}`
+          : `${isAfterSellRevision ? "Provider declined after-sale revision request." : "Provider declined revision request."}${note ? ` Note: ${note}` : ""}`;
     const chat = await sendSystemOrderMessage({
       order,
       senderId: order.providerId,
@@ -860,19 +1271,25 @@ const respondProviderRevision = async (req, res, next) => {
       text,
     });
 
-    emitToUser(String(order.clientId), "notification:new", {
-      id: `NTF-${Date.now()}`,
-      type: action === "accept" ? "system" : "warning",
-      title: action === "accept" ? "Revision accepted by provider" : "Revision declined by provider",
-      description:
-        action === "accept"
-          ? `Provider is working on your revision for ${order.gigId?.title || "order"}.`
-          : `Provider declined revision for ${order.gigId?.title || "order"}. You can continue with payment.`,
-      data: {
-        notificationType: action === "accept" ? "order_revision_accepted" : "order_revision_declined",
-        orderId: order._id.toString(),
-        targetPath: `/client/orders/${order.orderNumber || order._id.toString()}`,
-        conversationId: chat?.conversationId || "",
+      emitToUser(String(order.clientId), "notification:new", {
+        id: `NTF-${Date.now()}`,
+        type: action === "accept" ? "system" : "warning",
+        title: action === "accept"
+          ? (isAfterSellRevision ? "After-sale revision accepted" : "Revision accepted by provider")
+          : (isAfterSellRevision ? "After-sale revision declined" : "Revision declined by provider"),
+        description:
+          action === "accept"
+            ? `Provider is working on your revision for ${order.gigId?.title || "order"}.`
+            : isAfterSellRevision
+              ? `Provider declined after-sale revision for ${order.gigId?.title || "order"}.`
+              : `Provider declined revision for ${order.gigId?.title || "order"}. You can continue with payment.`,
+        data: {
+          notificationType: action === "accept"
+            ? (isAfterSellRevision ? "order_after_sell_revision_accepted" : "order_revision_accepted")
+            : (isAfterSellRevision ? "order_after_sell_revision_declined" : "order_revision_declined"),
+          orderId: order._id.toString(),
+          targetPath: `/client/orders/${order.orderNumber || order._id.toString()}`,
+          conversationId: chat?.conversationId || "",
       },
       unread: true,
       createdAt: new Date().toISOString(),
@@ -909,35 +1326,42 @@ const cancelClientRevisionRequest = async (req, res, next) => {
       });
     }
 
-    if (!["revision_requested", "under_revision"].includes(order.status)) {
-      return res.status(400).json({
-        success: false,
-        message: "This order has no active revision request.",
+      if (!["revision_requested", "under_revision", "after_sell_revision_requested", "under_after_sell_revision"].includes(order.status)) {
+        return res.status(400).json({
+          success: false,
+          message: "This order has no active revision request.",
+        });
+      }
+
+      order.status = order.status === "after_sell_revision_requested" || order.status === "under_after_sell_revision"
+        ? "completed"
+        : "accepting_delivery";
+      order.revisionResponseNote = "Client cancelled revision request.";
+      order.revisionRespondedAt = new Date();
+      await order.save();
+
+      const chat = await sendSystemOrderMessage({
+        order,
+        senderId: order.clientId,
+        receiverId: order.providerId,
+        text:
+          order.status === "completed"
+            ? "Client cancelled after-sale revision request and order remains completed."
+            : "Client cancelled revision request and moved back to delivery acceptance.",
       });
-    }
-
-    order.status = "accepting_delivery";
-    order.revisionResponseNote = "Client cancelled revision request.";
-    order.revisionRespondedAt = new Date();
-    await order.save();
-
-    const chat = await sendSystemOrderMessage({
-      order,
-      senderId: order.clientId,
-      receiverId: order.providerId,
-      text: "Client cancelled revision request and moved back to delivery acceptance.",
-    });
 
     emitToUser(String(order.providerId), "notification:new", {
       id: `NTF-${Date.now()}`,
       type: "system",
-      title: "Revision request cancelled",
-      description: "Client cancelled revision request. Order is back to delivery acceptance.",
-      data: {
-        notificationType: "order_revision_cancelled",
-        orderId: order._id.toString(),
-        targetPath: `/provider/orders/${order._id.toString()}`,
-        conversationId: chat?.conversationId || "",
+        title: order.status === "completed" ? "After-sale revision cancelled" : "Revision request cancelled",
+        description: order.status === "completed"
+          ? "Client cancelled after-sale revision request. Order remains completed."
+          : "Client cancelled revision request. Order is back to delivery acceptance.",
+        data: {
+          notificationType: order.status === "completed" ? "order_after_sell_revision_cancelled" : "order_revision_cancelled",
+          orderId: order._id.toString(),
+          targetPath: `/provider/orders/${order._id.toString()}`,
+          conversationId: chat?.conversationId || "",
       },
       unread: true,
       createdAt: new Date().toISOString(),
@@ -1014,6 +1438,235 @@ const sendClientResolutionMessage = async (req, res, next) => {
   }
 };
 
+const createClientCheckoutSession = async (req, res, next) => {
+  try {
+    if (!req.user || !["client", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only clients can start checkout.",
+      });
+    }
+
+    if (!STRIPE_SECRET_KEY) {
+      return res.status(500).json({
+        success: false,
+        message: "Stripe is not configured on the server.",
+      });
+    }
+
+    const order = await Order.findOne({
+      _id: req.params.id,
+      clientId: req.user.id,
+    }).populate("gigId", "_id title categoryName");
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found.",
+      });
+    }
+
+    if (order.status !== "accepting_delivery") {
+      return res.status(400).json({
+        success: false,
+        message: "Payment is only available when delivery is pending approval.",
+      });
+    }
+
+    const amount = Math.max(Number(order.packagePrice) || 0, 0);
+    if (amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Order amount is invalid.",
+      });
+    }
+
+    const metadata = {
+      orderId: String(order._id),
+      orderNumber: String(order.orderNumber || ""),
+      clientId: String(order.clientId),
+      providerId: String(order.providerId),
+      packageTitle: String(order.packageTitle || ""),
+      packageName: String(order.packageName || ""),
+    };
+
+    const session = await stripeRequest("/v1/checkout/sessions", {
+      mode: "payment",
+      success_url: `${APP_URL}/client/orders/${order.orderNumber || order._id.toString()}?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${APP_URL}/client/orders/${order.orderNumber || order._id.toString()}`,
+      client_reference_id: String(order._id),
+      customer_email: req.user.email || undefined,
+      "line_items[0][price_data][currency]": "usd",
+      "line_items[0][price_data][product_data][name]": `${order.gigId?.title || "Service order"} - ${order.packageTitle || order.packageName || "Package"}`,
+      "line_items[0][price_data][unit_amount]": Math.round(amount * 100),
+      "line_items[0][quantity]": 1,
+      "metadata[orderId]": metadata.orderId,
+      "metadata[orderNumber]": metadata.orderNumber,
+      "metadata[clientId]": metadata.clientId,
+      "metadata[providerId]": metadata.providerId,
+      "metadata[packageTitle]": metadata.packageTitle,
+      "metadata[packageName]": metadata.packageName,
+    });
+
+    order.paymentStatus = "pending";
+    order.stripeCheckoutSessionId = session.id || "";
+    order.paymentAmount = amount;
+    order.paymentCurrency = "usd";
+    await order.save({ validateBeforeSave: false });
+
+    return res.status(200).json({
+      success: true,
+      message: "Checkout session created.",
+      data: {
+        checkoutUrl: session.url || "",
+        sessionId: session.id || "",
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const confirmClientCheckoutPayment = async (req, res, next) => {
+  try {
+    if (!req.user || !["client", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only clients can confirm payments.",
+      });
+    }
+
+    if (!STRIPE_SECRET_KEY) {
+      return res.status(500).json({
+        success: false,
+        message: "Stripe is not configured on the server.",
+      });
+    }
+
+    const sessionId = String(req.body.sessionId || req.query.sessionId || "").trim();
+    const clientRating = req.body.clientRating !== undefined && req.body.clientRating !== null
+      ? Number(req.body.clientRating)
+      : null;
+    const clientReview = String(req.body.clientReview || "").trim();
+    if (!sessionId) {
+      return res.status(400).json({
+        success: false,
+        message: "Stripe session ID is required.",
+      });
+    }
+
+    const session = await stripeGetRequest(`/v1/checkout/sessions/${sessionId}?expand[]=payment_intent`);
+    if (session.payment_status !== "paid") {
+      return res.status(400).json({
+        success: false,
+        message: "Payment has not been completed yet.",
+      });
+    }
+
+    const orderId = String(session?.metadata?.orderId || session?.client_reference_id || "");
+    const order = await Order.findOne({
+      _id: orderId,
+      clientId: req.user.id,
+    }).populate("gigId", "_id title");
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found.",
+      });
+    }
+
+    if (order.paymentStatus === "paid" && order.status === "completed") {
+      return res.status(200).json({
+        success: true,
+        message: "Payment already confirmed.",
+        data: { order: buildOrderSummary(order) },
+      });
+    }
+    const finalized = await finalizePaidOrder({
+      order,
+      session,
+      clientRating,
+      clientReview,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Payment confirmed and order completed.",
+      data: {
+        order: buildOrderSummary(finalized?.order || order),
+        providerEarningsAmount: finalized?.providerEarningsAmount || 0,
+        platformFeeAmount: finalized?.platformFeeAmount || 0,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const handleStripeWebhook = async (req, res) => {
+  try {
+    const signature = String(req.headers["stripe-signature"] || "");
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET || "";
+
+    if (!webhookSecret) {
+      return res.status(500).json({ success: false, message: "Stripe webhook secret is not configured." });
+    }
+
+    const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || "");
+    const parts = signature.split(",").reduce((acc, item) => {
+      const [key, value] = item.split("=");
+      if (key && value) acc[key.trim()] = value.trim();
+      return acc;
+    }, {});
+    const timestamp = parts.t;
+    const v1 = parts.v1;
+
+    if (!timestamp || !v1) {
+      return res.status(400).json({ success: false, message: "Invalid Stripe signature." });
+    }
+
+    const signedPayload = `${timestamp}.${rawBody.toString("utf8")}`;
+    const expectedSignature = crypto.createHmac("sha256", webhookSecret).update(signedPayload).digest("hex");
+    const expectedBuffer = Buffer.from(expectedSignature, "hex");
+    const providedBuffer = Buffer.from(v1, "hex");
+
+    if (expectedBuffer.length !== providedBuffer.length) {
+      return res.status(400).json({ success: false, message: "Stripe webhook signature verification failed." });
+    }
+
+    const isValid = crypto.timingSafeEqual(expectedBuffer, providedBuffer);
+
+    if (!isValid) {
+      return res.status(400).json({ success: false, message: "Stripe webhook signature verification failed." });
+    }
+
+    const event = JSON.parse(rawBody.toString("utf8"));
+
+    if (event.type === "checkout.session.completed") {
+      const session = event.data?.object || {};
+      if (session.payment_status === "paid") {
+        const orderId = String(session?.metadata?.orderId || session?.client_reference_id || "");
+        const order = await Order.findOne({
+          $or: [
+            { _id: orderId },
+            { stripeCheckoutSessionId: session.id },
+          ],
+        }).populate("gigId", "_id title");
+
+        if (order) {
+          await finalizePaidOrder({ order, session });
+        }
+      }
+    }
+
+    return res.status(200).json({ received: true });
+  } catch (error) {
+    console.error("Stripe webhook error:", error.message);
+    return res.status(500).json({ success: false, message: "Webhook processing failed." });
+  }
+};
+
 const finalizeClientOrder = async (req, res, next) => {
   try {
     if (!req.user || !["client", "superAdmin"].includes(req.user.role)) {
@@ -1076,6 +1729,7 @@ const finalizeClientOrder = async (req, res, next) => {
 module.exports = {
   createOrder,
   listProviderOrders,
+  getProviderDashboard,
   listClientOrders,
   getProviderOrderDetail,
   getClientOrderDetail,
@@ -1086,5 +1740,9 @@ module.exports = {
   respondProviderRevision,
   cancelClientRevisionRequest,
   sendClientResolutionMessage,
+  createClientCheckoutSession,
+  confirmClientCheckoutPayment,
+  submitClientOrderReview,
+  handleStripeWebhook,
   finalizeClientOrder,
 };
