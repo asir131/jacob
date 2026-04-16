@@ -1,8 +1,42 @@
 const mongoose = require("mongoose");
+const cloudinary = require("../config/cloudinary");
 const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
 const Order = require("../models/Order");
 const { emitToUser } = require("../socket");
+
+const uploadBufferToCloudinary = (buffer, folder, resourceType = "auto") => {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder,
+        resource_type: resourceType,
+      },
+      (error, result) => {
+        if (error) return reject(error);
+        return resolve(result);
+      }
+    );
+    stream.end(buffer);
+  });
+};
+
+const uploadChatAttachments = async (files = []) => {
+  if (!Array.isArray(files) || files.length === 0) return [];
+  const uploads = await Promise.all(
+    files.slice(0, 4).map(async (file) => {
+      const result = await uploadBufferToCloudinary(file.buffer, "jacob/chat-attachments", "auto");
+      return {
+        url: result?.secure_url || "",
+        fileName: String(file.originalname || "").trim(),
+        mimeType: String(file.mimetype || "").trim(),
+        resourceType: String(result?.resource_type || "raw").trim(),
+      };
+    })
+  );
+
+  return uploads.filter((item) => item.url);
+};
 
 const normalizeConversation = (conversation, currentUserId) => {
   if (!conversation) return null;
@@ -15,6 +49,8 @@ const normalizeConversation = (conversation, currentUserId) => {
     orderNumber: order?.orderNumber || "",
     orderName: order?.gigId?.title || "",
     packageTitle: order?.packageTitle || "",
+    categoryName: order?.categoryName || order?.gigId?.categoryName || "",
+    blockedBy: conversation.blockedBy || null,
     lastMessage: conversation.lastMessage || "",
     lastMessageAt: conversation.lastMessageAt || conversation.updatedAt || conversation.createdAt,
     updatedAt: conversation.updatedAt,
@@ -35,6 +71,14 @@ const normalizeMessage = (message) => ({
   senderId: message.senderId?._id || message.senderId,
   receiverId: message.receiverId?._id || message.receiverId,
   text: message.text || "",
+  attachments: Array.isArray(message.attachments)
+    ? message.attachments.map((item) => ({
+        url: item?.url || "",
+        fileName: item?.fileName || "",
+        mimeType: item?.mimeType || "",
+        resourceType: item?.resourceType || "raw",
+      }))
+    : [],
   createdAt: message.createdAt,
   readAt: message.readAt || null,
 });
@@ -55,6 +99,7 @@ const ensureConversationForOrder = async ({ orderId, clientId, providerId }) => 
     conversation = await Conversation.create({
       orderId: order._id,
       participants: [clientId, providerId],
+      blockedBy: null,
       lastMessage: "",
       lastMessageAt: null,
     });
@@ -80,9 +125,10 @@ const getConversations = async (req, res, next) => {
       .populate("participants", "_id firstName lastName email avatar role")
       .populate({
         path: "orderId",
-        select: "_id orderNumber gigId packageTitle",
-        populate: { path: "gigId", select: "title" },
+        select: "_id orderNumber gigId packageTitle categoryName",
+        populate: { path: "gigId", select: "title categoryName" },
       })
+      .select("_id participants orderId blockedBy lastMessage lastMessageAt updatedAt createdAt")
       .sort({ updatedAt: -1 })
       .lean();
 
@@ -135,9 +181,10 @@ const ensureConversationByOrder = async (req, res, next) => {
       .populate("participants", "_id firstName lastName email avatar role")
       .populate({
         path: "orderId",
-        select: "_id orderNumber gigId packageTitle",
-        populate: { path: "gigId", select: "title" },
+        select: "_id orderNumber gigId packageTitle categoryName",
+        populate: { path: "gigId", select: "title categoryName" },
       })
+      .select("_id participants orderId blockedBy lastMessage lastMessageAt updatedAt createdAt")
       .lean();
 
     return res.status(200).json({
@@ -176,14 +223,20 @@ const getConversationMessages = async (req, res, next) => {
     const skip = (page - 1) * limit;
 
     const [messages, totalItems] = await Promise.all([
-      Message.find({ conversationId })
+      Message.find({
+        conversationId,
+        hiddenFor: { $ne: req.user.id },
+      })
         .populate("senderId", "_id firstName lastName avatar")
         .populate("receiverId", "_id firstName lastName avatar")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
-      Message.countDocuments({ conversationId }),
+      Message.countDocuments({
+        conversationId,
+        hiddenFor: { $ne: req.user.id },
+      }),
     ]);
 
     const totalPages = Math.max(1, Math.ceil(totalItems / limit));
@@ -216,14 +269,15 @@ const sendMessage = async (req, res, next) => {
 
     const { conversationId } = req.params;
     const text = String(req.body.text || "").trim();
+    const attachments = await uploadChatAttachments(req.files || []);
     if (!mongoose.Types.ObjectId.isValid(conversationId)) {
       return res.status(400).json({ success: false, message: "Invalid conversation id." });
     }
-    if (!text) {
-      return res.status(400).json({ success: false, message: "Message text is required." });
+    if (!text && attachments.length === 0) {
+      return res.status(400).json({ success: false, message: "Message text or attachments are required." });
     }
 
-    const conversation = await Conversation.findById(conversationId).select("_id participants orderId");
+    const conversation = await Conversation.findById(conversationId).select("_id participants orderId blockedBy");
     if (!conversation) {
       return res.status(404).json({ success: false, message: "Conversation not found." });
     }
@@ -231,6 +285,12 @@ const sendMessage = async (req, res, next) => {
     const participants = conversation.participants.map((id) => String(id));
     if (!participants.includes(String(req.user.id)) && req.user.role !== "superAdmin") {
       return res.status(403).json({ success: false, message: "Forbidden." });
+    }
+    if (conversation.blockedBy && req.user.role !== "superAdmin") {
+      return res.status(403).json({
+        success: false,
+        message: "You can't send message to this user anymore.",
+      });
     }
 
     const receiverId = participants.find((id) => id !== String(req.user.id));
@@ -244,9 +304,17 @@ const sendMessage = async (req, res, next) => {
       senderId: req.user.id,
       receiverId,
       text,
+      attachments,
     });
 
-    conversation.lastMessage = text;
+    const lastMessage = text
+      ? text
+      : (attachments[0]?.mimeType || "").startsWith("image/")
+        ? "Sent an image"
+        : attachments.length > 0
+          ? "Sent an attachment"
+          : "";
+    conversation.lastMessage = lastMessage;
     conversation.lastMessageAt = new Date();
     await conversation.save({ validateBeforeSave: false });
 
@@ -257,7 +325,8 @@ const sendMessage = async (req, res, next) => {
     const normalized = normalizeMessage(hydrated);
     const senderName =
       `${hydrated?.senderId?.firstName || ""} ${hydrated?.senderId?.lastName || ""}`.trim() || "Someone";
-    const messagePreview = text.length > 120 ? `${text.slice(0, 117)}...` : text;
+    const previewSource = text || lastMessage;
+    const messagePreview = previewSource.length > 120 ? `${previewSource.slice(0, 117)}...` : previewSource;
     const orderId = conversation.orderId ? String(conversation.orderId) : "";
     const conversationIdStr = String(conversation._id);
     const targetPath = orderId
@@ -268,12 +337,12 @@ const sendMessage = async (req, res, next) => {
     emitToUser(String(req.user.id), "chat:message:new", normalized);
     emitToUser(String(receiverId), "chat:conversation:updated", {
       conversationId: conversationIdStr,
-      lastMessage: text,
+      lastMessage,
       lastMessageAt: conversation.lastMessageAt,
     });
     emitToUser(String(req.user.id), "chat:conversation:updated", {
       conversationId: conversationIdStr,
-      lastMessage: text,
+      lastMessage,
       lastMessageAt: conversation.lastMessageAt,
     });
     emitToUser(String(receiverId), "notification:new", {
@@ -296,6 +365,184 @@ const sendMessage = async (req, res, next) => {
       success: true,
       message: "Message sent successfully.",
       data: normalized,
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const clearConversationHistory = async (req, res, next) => {
+  try {
+    if (!req.user?.id) {
+      return res.status(401).json({ success: false, message: "Unauthorized." });
+    }
+
+    const { conversationId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({ success: false, message: "Invalid conversation id." });
+    }
+
+    const conversation = await Conversation.findById(conversationId).select("_id participants");
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "Conversation not found." });
+    }
+
+    const allowed = conversation.participants.some((id) => String(id) === String(req.user.id));
+    if (!allowed && req.user.role !== "superAdmin") {
+      return res.status(403).json({ success: false, message: "Forbidden." });
+    }
+
+    const result = await Message.updateMany(
+      { conversationId, hiddenFor: { $ne: req.user.id } },
+      {
+        $addToSet: {
+          hiddenFor: req.user.id,
+        },
+      }
+    );
+
+    emitToUser(String(req.user.id), "chat:conversation:updated", {
+      conversationId: String(conversation._id),
+      historyCleared: true,
+    });
+
+    const otherParticipant = conversation.participants.find((id) => String(id) !== String(req.user.id));
+    if (otherParticipant) {
+      emitToUser(String(otherParticipant), "chat:conversation:updated", {
+        conversationId: String(conversation._id),
+        historyCleared: true,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Conversation history cleared.",
+      data: {
+        modifiedCount: Number(result?.modifiedCount || 0),
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const blockConversationUser = async (req, res, next) => {
+  try {
+    if (!req.user?.id) {
+      return res.status(401).json({ success: false, message: "Unauthorized." });
+    }
+
+    const { conversationId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({ success: false, message: "Invalid conversation id." });
+    }
+
+    const conversation = await Conversation.findById(conversationId).select("_id participants blockedBy");
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "Conversation not found." });
+    }
+
+    const allowed = conversation.participants.some((id) => String(id) === String(req.user.id));
+    if (!allowed && req.user.role !== "superAdmin") {
+      return res.status(403).json({ success: false, message: "Forbidden." });
+    }
+
+    conversation.blockedBy = req.user.id;
+    await conversation.save({ validateBeforeSave: false });
+
+    emitToUser(String(req.user.id), "chat:conversation:updated", {
+      conversationId: String(conversation._id),
+      blockedBy: String(req.user.id),
+    });
+
+    const otherParticipant = conversation.participants.find((id) => String(id) !== String(req.user.id));
+    if (otherParticipant) {
+      emitToUser(String(otherParticipant), "chat:conversation:updated", {
+        conversationId: String(conversation._id),
+        blockedBy: String(req.user.id),
+      });
+      emitToUser(String(otherParticipant), "notification:new", {
+        id: `NTF-${Date.now()}`,
+        type: "chat_blocked",
+        title: "Conversation blocked",
+        description: "You can't send message to this user anymore.",
+        unread: true,
+        createdAt: new Date().toISOString(),
+        data: {
+          notificationType: "chat_blocked",
+          conversationId: String(conversation._id),
+        },
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "User blocked successfully.",
+      data: {
+        conversationId: String(conversation._id),
+        blockedBy: String(req.user.id),
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const unblockConversationUser = async (req, res, next) => {
+  try {
+    if (!req.user?.id) {
+      return res.status(401).json({ success: false, message: "Unauthorized." });
+    }
+
+    const { conversationId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({ success: false, message: "Invalid conversation id." });
+    }
+
+    const conversation = await Conversation.findById(conversationId).select("_id participants blockedBy");
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "Conversation not found." });
+    }
+
+    if (!conversation.blockedBy || String(conversation.blockedBy) !== String(req.user.id)) {
+      return res.status(403).json({ success: false, message: "You can only unblock a conversation you blocked." });
+    }
+
+    conversation.blockedBy = null;
+    await conversation.save({ validateBeforeSave: false });
+
+    emitToUser(String(req.user.id), "chat:conversation:updated", {
+      conversationId: String(conversation._id),
+      blockedBy: null,
+    });
+
+    const otherParticipant = conversation.participants.find((id) => String(id) !== String(req.user.id));
+    if (otherParticipant) {
+      emitToUser(String(otherParticipant), "chat:conversation:updated", {
+        conversationId: String(conversation._id),
+        blockedBy: null,
+      });
+      emitToUser(String(otherParticipant), "notification:new", {
+        id: `NTF-${Date.now()}`,
+        type: "chat_unblocked",
+        title: "Conversation unblocked",
+        description: "You can send messages again.",
+        unread: true,
+        createdAt: new Date().toISOString(),
+        data: {
+          notificationType: "chat_unblocked",
+          conversationId: String(conversation._id),
+        },
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "User unblocked successfully.",
+      data: {
+        conversationId: String(conversation._id),
+        blockedBy: null,
+      },
     });
   } catch (error) {
     return next(error);
@@ -395,4 +642,7 @@ module.exports = {
   sendMessage,
   markConversationMessagesAsRead,
   markAllProviderMessagesAsRead,
+  clearConversationHistory,
+  blockConversationUser,
+  unblockConversationUser,
 };

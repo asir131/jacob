@@ -28,13 +28,44 @@ const messageSchema = new mongoose.Schema(
     },
     text: {
       type: String,
-      required: true,
+      default: "",
       trim: true,
     },
+    attachments: [
+      {
+        url: {
+          type: String,
+          default: "",
+          trim: true,
+        },
+        fileName: {
+          type: String,
+          default: "",
+          trim: true,
+        },
+        mimeType: {
+          type: String,
+          default: "",
+          trim: true,
+        },
+        resourceType: {
+          type: String,
+          default: "raw",
+          trim: true,
+        },
+      },
+    ],
     readAt: {
       type: Date,
       default: null,
     },
+    hiddenFor: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: [],
+      },
+    ],
   },
   {
     timestamps: true,

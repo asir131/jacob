@@ -1,5 +1,8 @@
 const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
+const mongoose = require("mongoose");
+const Conversation = require("../models/Conversation");
+const Message = require("../models/Message");
 
 let ioInstance = null;
 
@@ -42,6 +45,96 @@ const initSocket = (httpServer) => {
     if (socket.data.role) {
       socket.join(`role:${socket.data.role}`);
     }
+
+    const relayCallEvent = (eventName, targetUserId, payload = {}) => {
+      if (!targetUserId) return;
+      ioInstance.to(`user:${targetUserId}`).emit(eventName, {
+        ...payload,
+        senderId: socket.data.userId,
+        senderRole: socket.data.role,
+      });
+    };
+
+    const persistCallHistory = async (payload = {}) => {
+      try {
+        const conversationId = String(payload.conversationId || "");
+        const targetUserId = String(payload.targetUserId || "");
+        const callType = payload.callType === "video" ? "video" : "voice";
+
+        if (
+          !mongoose.Types.ObjectId.isValid(conversationId) ||
+          !mongoose.Types.ObjectId.isValid(targetUserId) ||
+          !mongoose.Types.ObjectId.isValid(String(socket.data.userId || ""))
+        ) {
+          return;
+        }
+
+        const conversation = await Conversation.findById(conversationId).select("_id participants orderId");
+        if (!conversation) return;
+
+        const participantIds = Array.isArray(conversation.participants)
+          ? conversation.participants.map((id) => String(id))
+          : [];
+        const callerId = String(socket.data.userId);
+
+        if (!participantIds.includes(callerId) || !participantIds.includes(targetUserId)) {
+          return;
+        }
+
+        const text = callType === "video" ? "Started a video call" : "Started a voice call";
+
+        const message = await Message.create({
+          conversationId: conversation._id,
+          orderId: conversation.orderId || null,
+          senderId: callerId,
+          receiverId: targetUserId,
+          text,
+        });
+
+        conversation.lastMessage = text;
+        conversation.lastMessageAt = message.createdAt || new Date();
+        await conversation.save({ validateBeforeSave: false });
+
+        const normalized = {
+          id: message._id,
+          conversationId: message.conversationId,
+          orderId: message.orderId || null,
+          senderId: message.senderId,
+          receiverId: message.receiverId,
+          text: message.text || "",
+          createdAt: message.createdAt,
+          readAt: message.readAt || null,
+        };
+
+        ioInstance.to(`user:${callerId}`).emit("chat:message:new", normalized);
+        ioInstance.to(`user:${targetUserId}`).emit("chat:message:new", normalized);
+        ioInstance.to(`user:${callerId}`).emit("chat:conversation:updated", {
+          conversationId,
+          lastMessage: text,
+          lastMessageAt: conversation.lastMessageAt,
+        });
+        ioInstance.to(`user:${targetUserId}`).emit("chat:conversation:updated", {
+          conversationId,
+          lastMessage: text,
+          lastMessageAt: conversation.lastMessageAt,
+        });
+      } catch (error) {
+        console.error("Failed to persist call history:", error);
+      }
+    };
+
+    socket.on("call:invite", async (payload = {}) => {
+      await persistCallHistory(payload);
+      relayCallEvent("call:invite", payload.targetUserId, payload);
+    });
+
+    socket.on("call:signal", (payload = {}) => {
+      relayCallEvent("call:signal", payload.targetUserId, payload);
+    });
+
+    socket.on("call:end", (payload = {}) => {
+      relayCallEvent("call:end", payload.targetUserId, payload);
+    });
 
     socket.emit("socket:connected", {
       userId: socket.data.userId,

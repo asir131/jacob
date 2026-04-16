@@ -1,4 +1,7 @@
+const mongoose = require("mongoose");
 const User = require("../models/User");
+const Gig = require("../models/Gig");
+const Order = require("../models/Order");
 const cloudinary = require("../config/cloudinary");
 const bcrypt = require("bcryptjs");
 const { emitToRole, emitToUser } = require("../socket");
@@ -48,6 +51,188 @@ const serializeUser = (userDoc) => {
       rejectionReason: userDoc?.payoutInfo?.rejectionReason || "",
     },
   };
+};
+
+const getPublicProviderLocation = (providerDoc = {}) => {
+  const serviceCity = String(providerDoc?.serviceCity || "").trim();
+  if (serviceCity) return serviceCity;
+
+  const address = String(providerDoc?.address || "").trim();
+  if (address) return address;
+
+  const lat = typeof providerDoc?.serviceLocationLat === "number" ? providerDoc.serviceLocationLat : null;
+  const lng = typeof providerDoc?.serviceLocationLng === "number" ? providerDoc.serviceLocationLng : null;
+  if (lat !== null && lng !== null) {
+    return `Lat ${lat.toFixed(4)}, Lng ${lng.toFixed(4)}`;
+  }
+
+  return "Location unavailable";
+};
+
+const getPublicProviderProfile = async (req, res, next) => {
+  try {
+    const { providerId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(providerId)) {
+      return res.status(404).json({
+        success: false,
+        message: "Provider not found.",
+      });
+    }
+
+    const provider = await User.findOne({ _id: providerId, role: "provider" })
+      .select(
+        "_id firstName lastName email avatar phone address businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng averageRating reviewCount sellerLevel createdAt"
+      )
+      .lean();
+
+    if (!provider) {
+      return res.status(404).json({
+        success: false,
+        message: "Provider not found.",
+      });
+    }
+
+    const [gigDocs, reviewDocs, orderStats] = await Promise.all([
+      Gig.find({ providerId, status: "published" })
+        .sort({ publishedAt: -1, createdAt: -1 })
+        .lean(),
+      Order.find({
+        providerId,
+        status: "completed",
+        paymentStatus: "paid",
+        clientRating: { $ne: null },
+      })
+        .populate("clientId", "_id firstName lastName avatar")
+        .populate("gigId", "_id title categoryName")
+        .sort({ completedAt: -1, updatedAt: -1, createdAt: -1 })
+        .lean(),
+      Order.find({ providerId }).select("_id status scheduledDate completedAt createdAt").lean(),
+    ]);
+
+    const gigs = gigDocs.map((gig) => {
+      const packages = Array.isArray(gig.packages) ? gig.packages : [];
+      const validPrices = packages
+        .map((item) => Number(item?.price) || 0)
+        .filter((price) => price > 0);
+      const startingPrice = validPrices.length
+        ? Number(Math.min(...validPrices).toFixed(2))
+        : 0;
+      const avgPackagePrice = validPrices.length
+        ? Number((validPrices.reduce((sum, price) => sum + price, 0) / validPrices.length).toFixed(2))
+        : 0;
+
+      return {
+        id: gig._id,
+        title: gig.title || "",
+        categoryName: gig.categoryName || "",
+        categorySlug: gig.categorySlug || "",
+        images: Array.isArray(gig.images) ? gig.images : [],
+        startingPrice,
+        avgPackagePrice,
+        provider: {
+          id: provider._id,
+          name: `${provider.firstName || ""} ${provider.lastName || ""}`.trim() || "Provider",
+          avatar: provider.avatar || "",
+          rating: Number(provider.averageRating) || 0,
+          sellerLevel: provider.sellerLevel || "New",
+          level: provider.sellerLevel || "New",
+        },
+      };
+    });
+
+    const reviews = reviewDocs.map((order) => {
+      const client = order.clientId || {};
+      return {
+        id: order._id,
+        orderId: order._id,
+        gigId: order.gigId?._id || null,
+        gigName: order.gigId?.title || order.gigId?.categoryName || "Service order",
+        rating: Number(order.clientRating) || 0,
+        review: order.clientReview || "",
+        createdAt: order.completedAt || order.updatedAt || order.createdAt || null,
+        client: {
+          id: client._id || "",
+          name: `${client.firstName || ""} ${client.lastName || ""}`.trim() || "Client",
+          avatar: client.avatar || "",
+        },
+      };
+    });
+
+    const totalOrders = orderStats.length;
+    const completedOrders = orderStats.filter((order) => String(order.status || "") === "completed" && order.completedAt).length;
+    const respondedOrders = orderStats.filter((order) =>
+      [
+        "accepted",
+        "accepting_delivery",
+        "revision_requested",
+        "under_revision",
+        "after_sell_revision_requested",
+        "under_after_sell_revision",
+        "done_after_sell_revision",
+        "completed",
+        "declined",
+      ].includes(String(order.status || ""))
+    ).length;
+    const onTimeCompletedOrders = orderStats.filter((order) => {
+      if (String(order.status || "") !== "completed" || !order.completedAt || !order.scheduledDate) {
+        return false;
+      }
+      const completedAt = new Date(order.completedAt).getTime();
+      const scheduledDate = new Date(order.scheduledDate).getTime();
+      return Number.isFinite(completedAt) && Number.isFinite(scheduledDate) && completedAt <= scheduledDate;
+    }).length;
+
+    const completionRate = totalOrders > 0 ? Number(((completedOrders / totalOrders) * 100).toFixed(1)) : 0;
+    const responseRate = totalOrders > 0 ? Number(((respondedOrders / totalOrders) * 100).toFixed(1)) : 0;
+    const deliveredOnTimeRate = completedOrders > 0 ? Number(((onTimeCompletedOrders / completedOrders) * 100).toFixed(1)) : 0;
+    const recommendRate = completionRate;
+    const providerName = `${provider.firstName || ""} ${provider.lastName || ""}`.trim() || "Provider";
+    const providerLocation = getPublicProviderLocation(provider);
+    const experienceLevel = String(provider.experienceLevel || "").trim();
+    const sellerLevel = String(provider.sellerLevel || "New");
+    const averageRating = Number(provider.averageRating) || 0;
+    const reviewCount = Number(provider.reviewCount) || 0;
+
+    return res.status(200).json({
+      success: true,
+      message: "Provider public profile fetched successfully.",
+      data: {
+        provider: {
+          id: provider._id,
+          name: providerName,
+          firstName: provider.firstName || "",
+          lastName: provider.lastName || "",
+          avatar: provider.avatar || "",
+          email: provider.email || "",
+          phone: provider.phone || "",
+          address: provider.address || "",
+          bio: provider.businessBio || "",
+          experienceLevel,
+          sellerLevel,
+          level: sellerLevel,
+          rating: averageRating,
+          reviewCount,
+          completedOrders,
+          totalOrders,
+          completionRate,
+          recommendRate,
+          location: providerLocation,
+          joinedAt: provider.createdAt || null,
+        },
+        gigs,
+        reviews,
+        performance: {
+          responseRate,
+          deliveredOnTime: deliveredOnTimeRate,
+          orderCompletion: completionRate,
+        },
+        skills: [...new Set(gigs.map((gig) => gig.categoryName).filter(Boolean))],
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
 };
 
 const uploadBufferToCloudinary = (buffer, folder) => {
@@ -581,6 +766,7 @@ const changePassword = async (req, res, next) => {
 
 module.exports = {
   getMyProfile,
+  getPublicProviderProfile,
   uploadAvatar,
   updateProfile,
   changePassword,

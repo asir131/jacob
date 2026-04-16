@@ -15,6 +15,12 @@ const conversationSchema = new mongoose.Schema(
         required: true,
       },
     ],
+    blockedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      index: true,
+    },
     lastMessage: {
       type: String,
       default: "",
