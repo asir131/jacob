@@ -8,6 +8,9 @@ const {
   uploadAvatar,
   updateProfile,
   changePassword,
+  saveService,
+  removeSavedService,
+  getMySavedServices,
   submitPayoutInfo,
   listProviderVerifications,
   getProviderVerificationDetails,
@@ -25,6 +28,9 @@ const upload = multer({
 });
 
 router.get("/me", requireAuth, getMyProfile);
+router.get("/me/saved-services", requireAuth, getMySavedServices);
+router.post("/me/saved-services/:gigId", requireAuth, saveService);
+router.delete("/me/saved-services/:gigId", requireAuth, removeSavedService);
 router.get("/provider/:providerId/public", getPublicProviderProfile);
 router.post("/avatar", requireAuth, upload.single("image"), uploadAvatar);
 router.put("/me", requireAuth, updateProfile);

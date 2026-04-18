@@ -8,9 +8,11 @@ const Message = require("../models/Message");
 const Conversation = require("../models/Conversation");
 const { emitToUser } = require("../socket");
 const { ensureConversationForOrder } = require("./chatController");
+const WithdrawalRequest = require("../models/WithdrawalRequest");
 
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
 const APP_URL = process.env.CLIENT_APP_URL || process.env.FRONTEND_URL || "http://localhost:3000";
+const ADMIN_FEE_RATE = 0.1;
 
 const uploadBufferToCloudinary = (buffer, folder) => {
   return new Promise((resolve, reject) => {
@@ -123,6 +125,21 @@ const normalizePoint = (lat, lng) => {
   return { lat: normalizedLat, lng: normalizedLng };
 };
 
+const roundMoney = (value) => Number((Number(value) || 0).toFixed(2));
+const calculateAdminFeeAmount = (baseAmount) => roundMoney((Number(baseAmount) || 0) * ADMIN_FEE_RATE);
+const calculateClientPaymentAmount = (baseAmount) =>
+  roundMoney((Number(baseAmount) || 0) + calculateAdminFeeAmount(baseAmount));
+const buildPackagePricing = (baseAmount) => {
+  const normalizedBaseAmount = roundMoney(baseAmount);
+  const adminFeeAmount = calculateAdminFeeAmount(normalizedBaseAmount);
+
+  return {
+    baseAmount: normalizedBaseAmount,
+    adminFeeAmount,
+    clientPaymentAmount: calculateClientPaymentAmount(normalizedBaseAmount),
+  };
+};
+
 
 const buildOrderSummary = (order) => {
   if (!order) return null;
@@ -166,7 +183,7 @@ const buildOrderSummary = (order) => {
     paymentCurrency: order.paymentCurrency || "usd",
     paymentAmount: Number(order.paymentAmount) || Number(order.packagePrice) || 0,
     platformFeeAmount: Number(order.platformFeeAmount) || 0,
-    providerEarningsAmount: Number(order.providerEarningsAmount) || 0,
+    providerEarningsAmount: Number(order.providerEarningsAmount) || Number(order.packagePrice) || 0,
     paidAt: order.paidAt || null,
     isRequestedOrder: !gig._id || !gig.title,
     client: {
@@ -492,8 +509,7 @@ const getClientDashboard = async (req, res, next) => {
       const summary = buildOrderSummary(order);
       const providerName = summary?.provider?.name || "Provider";
       const providerAvatar = summary?.provider?.avatar || "";
-      const packagePrice = Number(summary?.packagePrice || 0);
-      const totalAmount = packagePrice > 0 ? packagePrice : Number(summary?.paymentAmount || 0);
+      const totalAmount = Number(summary?.paymentAmount || 0) || Number(summary?.packagePrice || 0);
       const timeLabel = summary?.scheduledDate
         ? new Date(summary.scheduledDate).toLocaleDateString(undefined, {
             month: "short",
@@ -696,9 +712,19 @@ const finalizePaidOrder = async ({ order, session, clientRating = null, clientRe
   if (!order) return null;
 
   const alreadyPaid = order.paymentStatus === "paid" && order.status === "completed";
-  const amount = Number(order.packagePrice) || Number(order.paymentAmount) || 0;
-  const platformFeeAmount = Number((amount * 0.05).toFixed(2));
-  const providerEarningsAmount = Number((amount - platformFeeAmount).toFixed(2));
+  const baseAmount = roundMoney(order.packagePrice);
+  const platformFeeAmount =
+    Number(order.platformFeeAmount) > 0
+      ? roundMoney(order.platformFeeAmount)
+      : calculateAdminFeeAmount(baseAmount);
+  const providerEarningsAmount =
+    Number(order.providerEarningsAmount) > 0
+      ? roundMoney(order.providerEarningsAmount)
+      : baseAmount;
+  const paymentAmount =
+    Number(order.paymentAmount) > 0
+      ? roundMoney(order.paymentAmount)
+      : roundMoney(providerEarningsAmount + platformFeeAmount);
 
   if (!alreadyPaid) {
     order.paymentStatus = "paid";
@@ -706,7 +732,7 @@ const finalizePaidOrder = async ({ order, session, clientRating = null, clientRe
     order.stripeCheckoutSessionId = session?.id || order.stripeCheckoutSessionId || "";
     order.stripePaymentIntentId = String(session?.payment_intent?.id || session?.payment_intent || order.stripePaymentIntentId || "");
     order.paymentCurrency = String(session?.currency || order.paymentCurrency || "usd");
-    order.paymentAmount = amount;
+    order.paymentAmount = paymentAmount;
     order.platformFeeAmount = platformFeeAmount;
     order.providerEarningsAmount = providerEarningsAmount;
     order.paidAt = new Date();
@@ -732,7 +758,7 @@ const finalizePaidOrder = async ({ order, session, clientRating = null, clientRe
       id: `NTF-${Date.now()}`,
       type: "success",
       title: "Payment received",
-      description: `Client paid for ${order.gigId?.title || "your order"}. Provider earnings have been credited.`,
+      description: `Client paid for ${order.gigId?.title || "your order"}. Your full package earnings have been credited.`,
       data: {
         notificationType: "order_paid",
         orderId: order._id.toString(),
@@ -836,7 +862,6 @@ const createOrder = async (req, res, next) => {
       gigId,
       packageName,
       packageTitle,
-      packagePrice,
       scheduledDate,
       scheduledTime,
       serviceAddress,
@@ -858,7 +883,7 @@ const createOrder = async (req, res, next) => {
     }
 
     const gig = await Gig.findById(gigId)
-      .select("_id title providerId categoryName baseCity locationLat locationLng travelRadiusKm")
+      .select("_id title providerId categoryName baseCity locationLat locationLng travelRadiusKm packages")
       .lean();
 
     if (!gig || String(gig.providerId) === String(req.user.id)) {
@@ -867,6 +892,20 @@ const createOrder = async (req, res, next) => {
         message: "Service not found for booking.",
       });
     }
+
+    const normalizedPackageName = String(packageName).trim().toLowerCase();
+    const selectedGigPackage = Array.isArray(gig?.packages)
+      ? gig.packages.find((item) => String(item?.name || "").trim().toLowerCase() === normalizedPackageName)
+      : null;
+    const basePackagePrice = Number(selectedGigPackage?.price);
+    if (!selectedGigPackage || !Number.isFinite(basePackagePrice) || basePackagePrice <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Selected package is invalid for this gig.",
+      });
+    }
+
+    const pricing = buildPackagePricing(basePackagePrice);
 
     const [clientProfile, providerProfile] = await Promise.all([
       User.findById(req.user.id).select("_id address locationLat locationLng").lean(),
@@ -915,9 +954,9 @@ const createOrder = async (req, res, next) => {
       clientId: req.user.id,
       providerId: gig.providerId,
       packageName: String(packageName).trim(),
-      packageTitle: String(packageTitle).trim(),
+      packageTitle: String(selectedGigPackage?.title || packageTitle || packageName).trim(),
       categoryName: String(gig.categoryName || "").trim(),
-      packagePrice: Number(packagePrice) || 0,
+      packagePrice: pricing.baseAmount,
       scheduledDate: new Date(scheduledDate),
       scheduledTime: String(scheduledTime).trim(),
       serviceAddress: String(serviceAddress).trim(),
@@ -927,7 +966,9 @@ const createOrder = async (req, res, next) => {
       status: "pending",
       paymentStatus: "unpaid",
       paymentProvider: "stripe",
-      paymentAmount: Number(packagePrice) || 0,
+      paymentAmount: pricing.clientPaymentAmount,
+      platformFeeAmount: pricing.adminFeeAmount,
+      providerEarningsAmount: pricing.baseAmount,
       paymentCurrency: "usd",
     });
 
@@ -1773,7 +1814,7 @@ const createClientCheckoutSession = async (req, res, next) => {
       });
     }
 
-    const amount = Math.max(Number(order.packagePrice) || 0, 0);
+    const amount = Math.max(Number(order.paymentAmount) || Number(order.packagePrice) || 0, 0);
     if (amount <= 0) {
       return res.status(400).json({
         success: false,
@@ -1901,6 +1942,130 @@ const confirmClientCheckoutPayment = async (req, res, next) => {
         order: buildOrderSummary(finalized?.order || order),
         providerEarningsAmount: finalized?.providerEarningsAmount || 0,
         platformFeeAmount: finalized?.platformFeeAmount || 0,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const getAdminTransactions = async (req, res, next) => {
+  try {
+    const page = parsePage(req.query.page, 1);
+    const limit = Math.min(parsePage(req.query.limit, 10), 100);
+    const search = String(req.query.search || "").trim();
+    const status = String(req.query.status || "all").trim().toLowerCase();
+    const query = {};
+
+    if (status === "completed") {
+      query.paymentStatus = "paid";
+    } else if (status === "pending") {
+      query.paymentStatus = { $in: ["unpaid", "pending"] };
+    } else if (status === "failed") {
+      query.paymentStatus = "failed";
+    }
+
+    const searchRegex = search ? new RegExp(search, "i") : null;
+
+    const [orders, totals, pendingWithdrawals] = await Promise.all([
+      Order.find(query)
+        .populate("clientId", "_id firstName lastName email")
+        .populate("providerId", "_id firstName lastName email")
+        .populate("gigId", "_id title categoryName")
+        .sort({ paidAt: -1, createdAt: -1 })
+        .lean(),
+      Order.aggregate([
+        {
+          $match: {
+            paymentStatus: "paid",
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            totalAdminFees: { $sum: "$platformFeeAmount" },
+            totalProviderEarnings: { $sum: "$providerEarningsAmount" },
+            paidTransactions: { $sum: 1 },
+          },
+        },
+      ]),
+      WithdrawalRequest.aggregate([
+        {
+          $match: {
+            status: { $in: ["pending", "approved"] },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            totalAmount: { $sum: "$amount" },
+          },
+        },
+      ]),
+    ]);
+
+    const filteredItems = orders
+      .map((order) => {
+        const summary = buildOrderSummary(order);
+        const paymentStatusLabel =
+          summary?.paymentStatus === "paid"
+            ? "Completed"
+            : summary?.paymentStatus === "failed"
+              ? "Failed"
+              : "Pending";
+
+        return {
+          id: summary?.orderNumber || String(order._id),
+          orderId: String(order._id),
+          user: summary?.client?.name || "Client",
+          provider: summary?.provider?.name || "Provider",
+          service: summary?.orderName || summary?.gig?.title || "Service order",
+          amount: roundMoney(summary?.platformFeeAmount || 0),
+          totalPaid: roundMoney(summary?.paymentAmount || 0),
+          providerEarnings: roundMoney(summary?.providerEarningsAmount || summary?.packagePrice || 0),
+          date: summary?.paidAt || summary?.createdAt || null,
+          timestamp: new Date(summary?.paidAt || summary?.createdAt || 0).getTime(),
+          status: paymentStatusLabel,
+          method: String(summary?.paymentProvider || "stripe").toUpperCase(),
+        };
+      })
+      .filter((item) => {
+        if (!searchRegex) return true;
+        return (
+          searchRegex.test(item.id) ||
+          searchRegex.test(item.user) ||
+          searchRegex.test(item.provider) ||
+          searchRegex.test(item.service)
+        );
+      });
+
+    const totalItems = filteredItems.length;
+    const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+    const safePage = Math.min(page, totalPages);
+    const startIndex = (safePage - 1) * limit;
+    const items = filteredItems.slice(startIndex, startIndex + limit);
+    const totalsSummary = totals[0] || {};
+    const pendingWithdrawalAmount = Number(pendingWithdrawals?.[0]?.totalAmount || 0);
+
+    return res.status(200).json({
+      success: true,
+      message: "Admin transactions fetched successfully.",
+      data: {
+        items,
+        summary: {
+          totalAdminFees: roundMoney(totalsSummary.totalAdminFees || 0),
+          totalProviderEarnings: roundMoney(totalsSummary.totalProviderEarnings || 0),
+          paidTransactions: Number(totalsSummary.paidTransactions || 0),
+          pendingPayouts: roundMoney(pendingWithdrawalAmount),
+        },
+        pagination: {
+          page: safePage,
+          limit,
+          totalItems,
+          totalPages,
+          hasNextPage: safePage < totalPages,
+          hasPrevPage: safePage > 1,
+        },
       },
     });
   } catch (error) {
@@ -2046,6 +2211,7 @@ module.exports = {
   respondProviderRevision,
   cancelClientRevisionRequest,
   sendClientResolutionMessage,
+  getAdminTransactions,
   createClientCheckoutSession,
   confirmClientCheckoutPayment,
   submitClientOrderReview,

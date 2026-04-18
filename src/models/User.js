@@ -169,6 +169,13 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    savedServiceIds: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Gig",
+        default: [],
+      },
+    ],
   },
   {
     timestamps: true,

@@ -13,6 +13,9 @@ const PAYOUT_STATUS = {
   REJECTED: "rejected",
 };
 
+const roundMoney = (value) => Number((Number(value) || 0).toFixed(2));
+const calculateClientPrice = (baseAmount) => roundMoney((Number(baseAmount) || 0) * 1.1);
+
 const serializeUser = (userDoc) => {
   return {
     id: userDoc._id,
@@ -38,6 +41,9 @@ const serializeUser = (userDoc) => {
     averageRating: Number(userDoc.averageRating) || 0,
     reviewCount: Number(userDoc.reviewCount) || 0,
     sellerLevel: userDoc.sellerLevel || "New",
+    savedServiceIds: Array.isArray(userDoc.savedServiceIds)
+      ? userDoc.savedServiceIds.map((item) => String(item))
+      : [],
     payoutInfo: {
       accountHolderName: userDoc?.payoutInfo?.accountHolderName || "",
       bankAccountNumber: userDoc?.payoutInfo?.bankAccountNumber || "",
@@ -49,6 +55,38 @@ const serializeUser = (userDoc) => {
       submittedAt: userDoc?.payoutInfo?.submittedAt || null,
       reviewedAt: userDoc?.payoutInfo?.reviewedAt || null,
       rejectionReason: userDoc?.payoutInfo?.rejectionReason || "",
+    },
+  };
+};
+
+const buildSavedServiceCard = (gigDoc) => {
+  if (!gigDoc) return null;
+  const provider = gigDoc.providerId || {};
+  const packages = Array.isArray(gigDoc.packages) ? gigDoc.packages : [];
+  const validPrices = packages
+    .map((item) => calculateClientPrice(item?.price))
+    .filter((price) => price > 0);
+  const startingPrice = validPrices.length ? roundMoney(Math.min(...validPrices)) : 0;
+  const avgPackagePrice = validPrices.length
+    ? roundMoney(validPrices.reduce((sum, price) => sum + price, 0) / validPrices.length)
+    : 0;
+
+  return {
+    id: String(gigDoc._id),
+    title: gigDoc.title || "",
+    categoryName: gigDoc.categoryName || "",
+    categorySlug: gigDoc.categorySlug || "",
+    images: Array.isArray(gigDoc.images) ? gigDoc.images : [],
+    baseCity: gigDoc.baseCity || "",
+    startingPrice,
+    avgPackagePrice,
+    provider: {
+      id: provider._id ? String(provider._id) : "",
+      name: `${provider.firstName || ""} ${provider.lastName || ""}`.trim() || "Provider",
+      avatar: provider.avatar || "",
+      rating: Number(provider.averageRating) || 0,
+      sellerLevel: provider.sellerLevel || "New",
+      level: provider.sellerLevel || "New",
     },
   };
 };
@@ -127,6 +165,7 @@ const getPublicProviderProfile = async (req, res, next) => {
         title: gig.title || "",
         categoryName: gig.categoryName || "",
         categorySlug: gig.categorySlug || "",
+        expertType: gig.expertType === "team" ? "team" : "solo",
         images: Array.isArray(gig.images) ? gig.images : [],
         startingPrice,
         avgPackagePrice,
@@ -274,7 +313,7 @@ const uploadAvatar = async (req, res, next) => {
       req.user.id,
       { avatar: result.secure_url },
       { new: true }
-    ).select("_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus walletBalance totalEarnings totalWithdrawn averageRating reviewCount sellerLevel payoutInfo");
+    ).select("_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus walletBalance totalEarnings totalWithdrawn averageRating reviewCount sellerLevel payoutInfo savedServiceIds");
 
     if (!updatedUser) {
       return res.status(404).json({
@@ -355,7 +394,7 @@ const updateProfile = async (req, res, next) => {
     const updatedUser = await User.findByIdAndUpdate(req.user.id, updates, {
       new: true,
       runValidators: true,
-    }).select("_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus walletBalance totalEarnings totalWithdrawn averageRating reviewCount sellerLevel payoutInfo");
+    }).select("_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus walletBalance totalEarnings totalWithdrawn averageRating reviewCount sellerLevel payoutInfo savedServiceIds");
 
     if (!updatedUser) {
       return res.status(404).json({
@@ -379,7 +418,7 @@ const updateProfile = async (req, res, next) => {
 const getMyProfile = async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id).select(
-      "_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus walletBalance totalEarnings totalWithdrawn averageRating reviewCount sellerLevel payoutInfo"
+      "_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus walletBalance totalEarnings totalWithdrawn averageRating reviewCount sellerLevel payoutInfo savedServiceIds"
     );
 
     if (!user) {
@@ -394,6 +433,135 @@ const getMyProfile = async (req, res, next) => {
       message: "Profile fetched successfully.",
       data: {
         user: serializeUser(user),
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const saveService = async (req, res, next) => {
+  try {
+    if (!req.user || !["client", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only clients can save services.",
+      });
+    }
+
+    const { gigId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(gigId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid service id.",
+      });
+    }
+
+    const gig = await Gig.findOne({ _id: gigId, status: "published" }).select("_id");
+    if (!gig) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found.",
+      });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.user.id,
+      { $addToSet: { savedServiceIds: gig._id } },
+      { new: true }
+    ).select(
+      "_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus walletBalance totalEarnings totalWithdrawn averageRating reviewCount sellerLevel payoutInfo savedServiceIds"
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Service saved successfully.",
+      data: {
+        user: serializeUser(user),
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const removeSavedService = async (req, res, next) => {
+  try {
+    if (!req.user || !["client", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only clients can remove saved services.",
+      });
+    }
+
+    const { gigId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(gigId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid service id.",
+      });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.user.id,
+      { $pull: { savedServiceIds: gigId } },
+      { new: true }
+    ).select(
+      "_id firstName lastName email role avatar phone address preferredLanguage locationLat locationLng businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng payoutVerificationStatus walletBalance totalEarnings totalWithdrawn averageRating reviewCount sellerLevel payoutInfo savedServiceIds"
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Saved service removed.",
+      data: {
+        user: serializeUser(user),
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const getMySavedServices = async (req, res, next) => {
+  try {
+    if (!req.user || !["client", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only clients can view saved services.",
+      });
+    }
+
+    const user = await User.findById(req.user.id).select("savedServiceIds").lean();
+    const savedServiceIds = Array.isArray(user?.savedServiceIds) ? user.savedServiceIds : [];
+
+    if (savedServiceIds.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: "Saved services fetched successfully.",
+        data: {
+          items: [],
+        },
+      });
+    }
+
+    const gigs = await Gig.find({
+      _id: { $in: savedServiceIds },
+      status: "published",
+    })
+      .populate("providerId", "_id firstName lastName avatar averageRating sellerLevel")
+      .lean();
+
+    const orderMap = new Map(savedServiceIds.map((id, index) => [String(id), index]));
+    const items = gigs
+      .map(buildSavedServiceCard)
+      .filter(Boolean)
+      .sort((left, right) => (orderMap.get(String(left.id)) ?? 0) - (orderMap.get(String(right.id)) ?? 0));
+
+    return res.status(200).json({
+      success: true,
+      message: "Saved services fetched successfully.",
+      data: {
+        items,
       },
     });
   } catch (error) {
@@ -770,6 +938,9 @@ module.exports = {
   uploadAvatar,
   updateProfile,
   changePassword,
+  saveService,
+  removeSavedService,
+  getMySavedServices,
   submitPayoutInfo,
   listProviderVerifications,
   getProviderVerificationDetails,

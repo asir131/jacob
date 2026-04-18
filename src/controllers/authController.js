@@ -79,6 +79,7 @@ const buildAuthPayload = (user, accessToken, refreshToken) => {
       averageRating: Number(user.averageRating) || 0,
       reviewCount: Number(user.reviewCount) || 0,
       sellerLevel: user.sellerLevel || "New",
+      savedServiceIds: Array.isArray(user.savedServiceIds) ? user.savedServiceIds.map((item) => String(item)) : [],
       payoutInfo: {
         accountHolderName: user?.payoutInfo?.accountHolderName || "",
         bankAccountNumber: user?.payoutInfo?.bankAccountNumber || "",

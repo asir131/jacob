@@ -1,6 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 const requireAuth = require("../middlewares/requireAuth");
+const requireAdmin = require("../middlewares/requireAdmin");
 const {
   createOrder,
   getProviderDashboard,
@@ -16,6 +17,7 @@ const {
   respondProviderRevision,
   cancelClientRevisionRequest,
   sendClientResolutionMessage,
+  getAdminTransactions,
   createClientCheckoutSession,
   confirmClientCheckoutPayment,
   submitClientOrderReview,
@@ -29,6 +31,7 @@ const upload = multer({
 });
 
 router.post("/", requireAuth, createOrder);
+router.get("/admin/transactions", requireAuth, requireAdmin, getAdminTransactions);
 router.get("/provider/dashboard", requireAuth, getProviderDashboard);
 router.get("/provider", requireAuth, listProviderOrders);
 router.get("/provider/:id", requireAuth, getProviderOrderDetail);

@@ -9,6 +9,7 @@ const orderRoutes = require("./routes/orderRoutes");
 const serviceRequestRoutes = require("./routes/serviceRequestRoutes");
 const withdrawalRoutes = require("./routes/withdrawalRoutes");
 const faqRoutes = require("./routes/faqRoutes");
+const supportRoutes = require("./routes/supportRoutes");
 const { handleStripeWebhook } = require("./controllers/orderController");
 const chatRoutes = require("./routes/chatRoutes");
 const errorHandler = require("./middlewares/errorHandler");
@@ -46,6 +47,7 @@ app.use("/api/orders", orderRoutes);
 app.use("/api/withdrawals", withdrawalRoutes);
 app.use("/api/chats", chatRoutes);
 app.use("/api/faqs", faqRoutes);
+app.use("/api/support", supportRoutes);
 
 app.use(errorHandler);
 

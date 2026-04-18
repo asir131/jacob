@@ -1,6 +1,7 @@
 const Category = require("../models/Category");
 const Gig = require("../models/Gig");
 const GigRequest = require("../models/GigRequest");
+const Order = require("../models/Order");
 const mongoose = require("mongoose");
 const cloudinary = require("../config/cloudinary");
 const slugify = require("../utils/slugify");
@@ -10,6 +11,7 @@ const { emitToRole, emitToUser } = require("../socket");
 const DEFAULT_CATEGORY_ICON = "ShieldCheck";
 const DEFAULT_PACKAGE_NAMES = ["Basic", "Standard", "Premium"];
 const MAX_GIG_IMAGES = 4;
+const ADMIN_FEE_RATE = 0.1;
 
 const isCustomCategorySlug = (categorySlug = "", customCategoryName = "") => {
   return categorySlug === "create-your-own-category" || Boolean(String(customCategoryName).trim());
@@ -44,6 +46,10 @@ const normalizePackages = (packages = []) => {
     };
   });
 };
+
+const roundMoney = (value) => Number((Number(value) || 0).toFixed(2));
+const calculateAdminFeeAmount = (baseAmount) => roundMoney((Number(baseAmount) || 0) * ADMIN_FEE_RATE);
+const calculateClientPrice = (baseAmount) => roundMoney((Number(baseAmount) || 0) + calculateAdminFeeAmount(baseAmount));
 
 const normalizeImages = (images = []) => {
   if (!Array.isArray(images)) return [];
@@ -88,6 +94,7 @@ const parseGigRequestBody = (req) => {
   const customCategoryName = String(req.body.customCategoryName || "").trim();
   const customCategoryDescription = String(req.body.customCategoryDescription || "").trim();
   const customCategoryIconName = String(req.body.customCategoryIconName || "").trim();
+  const expertType = String(req.body.expertType || "solo").trim().toLowerCase() === "team" ? "team" : "solo";
   const locationLat = req.body.locationLat === "" || req.body.locationLat === undefined || req.body.locationLat === null
     ? null
     : Number(req.body.locationLat);
@@ -110,6 +117,7 @@ const parseGigRequestBody = (req) => {
     customCategoryName,
     customCategoryDescription,
     customCategoryIconName,
+    expertType,
     locationLat,
     locationLng,
     travelRadiusKm,
@@ -146,6 +154,7 @@ const createGig = async (req, res, next) => {
       customCategoryName,
       customCategoryDescription,
       customCategoryIconName,
+      expertType,
       locationLat,
       locationLng,
       travelRadiusKm,
@@ -197,6 +206,7 @@ const createGig = async (req, res, next) => {
         customCategoryName: category.name,
         customCategoryDescription: category.description,
         customCategoryIconName: category.iconName,
+        expertType,
         description,
         requirements,
         packages: normalizePackages(packages),
@@ -259,6 +269,7 @@ const createGig = async (req, res, next) => {
       categoryName,
       description,
       requirements,
+      expertType,
       packages: normalizePackages(packages),
       images,
       baseCity: String(baseCity || "").trim(),
@@ -319,6 +330,7 @@ const updateGig = async (req, res, next) => {
       customCategoryName,
       customCategoryDescription,
       customCategoryIconName,
+      expertType,
       locationLat,
       locationLng,
       travelRadiusKm,
@@ -384,6 +396,7 @@ const updateGig = async (req, res, next) => {
         gigRequest.customCategoryIconName = category.iconName;
         gigRequest.description = description;
         gigRequest.requirements = requirements;
+        gigRequest.expertType = expertType;
         gigRequest.packages = normalizedPackages;
         gigRequest.images = images;
         gigRequest.baseCity = baseCity;
@@ -448,6 +461,7 @@ const updateGig = async (req, res, next) => {
       gig.customCategoryIconName = "";
       gig.description = description;
       gig.requirements = requirements;
+      gig.expertType = expertType;
       gig.packages = normalizedPackages;
       gig.images = images;
       gig.baseCity = baseCity;
@@ -477,6 +491,7 @@ const updateGig = async (req, res, next) => {
     gig.customCategoryIconName = customCategoryIconName;
     gig.description = description;
     gig.requirements = requirements;
+    gig.expertType = expertType;
     gig.packages = normalizedPackages;
     gig.images = images;
     gig.baseCity = baseCity;
@@ -509,6 +524,7 @@ const updateGig = async (req, res, next) => {
       gigRequest.customCategoryIconName = category.iconName;
       gigRequest.description = description;
       gigRequest.requirements = requirements;
+      gigRequest.expertType = expertType;
       gigRequest.packages = normalizedPackages;
       gigRequest.images = images;
       gigRequest.baseCity = baseCity;
@@ -727,6 +743,7 @@ const approveGigRequest = async (req, res, next) => {
       gig.customCategoryIconName = category.iconName;
       gig.description = gigRequest.description;
       gig.requirements = gigRequest.requirements;
+      gig.expertType = gigRequest.expertType || "solo";
       gig.packages = gigRequest.packages || [];
       gig.images = gigRequest.images || [];
       gig.baseCity = gigRequest.baseCity || "";
@@ -749,6 +766,7 @@ const approveGigRequest = async (req, res, next) => {
         customCategoryIconName: category.iconName,
         description: gigRequest.description,
         requirements: gigRequest.requirements,
+        expertType: gigRequest.expertType || "solo",
         packages: gigRequest.packages || [],
         images: gigRequest.images || [],
         baseCity: gigRequest.baseCity || "",
@@ -931,7 +949,7 @@ const listPublicServices = async (req, res, next) => {
       .map((gig) => {
         const packages = Array.isArray(gig.packages) ? gig.packages : [];
         const validPrices = packages
-          .map((item) => Number(item?.price) || 0)
+          .map((item) => calculateClientPrice(item?.price))
           .filter((price) => price > 0);
         const avgPackagePrice = validPrices.length
           ? Number((validPrices.reduce((sum, price) => sum + price, 0) / validPrices.length).toFixed(2))
@@ -976,6 +994,7 @@ const listPublicServices = async (req, res, next) => {
           title: gig.title || "",
           categorySlug: gig.categorySlug || "",
           categoryName: gig.categoryName || "",
+          expertType: gig.expertType === "team" ? "team" : "solo",
           image: Array.isArray(gig.images) && gig.images[0] ? gig.images[0] : "",
           baseCity: resolvedBaseCity,
           zipCode: itemZipCode,
@@ -1066,12 +1085,23 @@ const getPublicServiceById = async (req, res, next) => {
       });
     }
 
-    const gig = await Gig.findOne({ _id: id, status: "published" })
+    const [gig, reviewOrders] = await Promise.all([
+      Gig.findOne({ _id: id, status: "published" })
       .populate(
         "providerId",
-        "_id firstName lastName avatar address serviceCity serviceLocationLat serviceLocationLng locationLat locationLng sellerLevel averageRating reviewCount"
+        "_id firstName lastName avatar address businessBio serviceCity serviceLocationLat serviceLocationLng locationLat locationLng sellerLevel averageRating reviewCount"
       )
-      .lean();
+      .lean(),
+      Order.find({
+        gigId: id,
+        status: "completed",
+        paymentStatus: "paid",
+        clientRating: { $ne: null },
+      })
+        .populate("clientId", "_id firstName lastName avatar")
+        .sort({ createdAt: -1 })
+        .lean(),
+    ]);
 
     if (!gig) {
       return res.status(404).json({
@@ -1089,11 +1119,26 @@ const getPublicServiceById = async (req, res, next) => {
     const zipCode = extractZipCode(resolvedBaseCity);
     const packages = Array.isArray(gig.packages) ? gig.packages : [];
     const validPrices = packages
-      .map((item) => Number(item?.price) || 0)
+      .map((item) => calculateClientPrice(item?.price))
       .filter((price) => price > 0);
     const avgPackagePrice = validPrices.length
       ? Number((validPrices.reduce((sum, price) => sum + price, 0) / validPrices.length).toFixed(2))
       : 0;
+    const reviews = reviewOrders.map((order) => {
+      const client = order.clientId || {};
+      const clientName = `${client.firstName || ""} ${client.lastName || ""}`.trim() || "Client";
+      return {
+        id: String(order._id),
+        rating: Number(order.clientRating) || 0,
+        review: String(order.clientReview || "").trim(),
+        createdAt: order.createdAt || null,
+        client: {
+          id: client._id ? String(client._id) : "",
+          name: clientName,
+          avatar: client.avatar || "",
+        },
+      };
+    });
 
     return res.status(200).json({
       success: true,
@@ -1103,6 +1148,7 @@ const getPublicServiceById = async (req, res, next) => {
         title: gig.title || "",
         categorySlug: gig.categorySlug || "",
         categoryName: gig.categoryName || "",
+        expertType: gig.expertType === "team" ? "team" : "solo",
         description: gig.description || "",
         requirements: gig.requirements || "",
         images: Array.isArray(gig.images) ? gig.images : [],
@@ -1117,18 +1163,20 @@ const getPublicServiceById = async (req, res, next) => {
           title: item?.title || "",
           description: item?.description || "",
           deliveryTime: item?.deliveryTime || "",
-          price: Number(item?.price) || 0,
+          price: calculateClientPrice(item?.price),
         })),
         provider: {
           id: provider._id || "",
           name: providerName,
           avatar: provider.avatar || "",
+          bio: String(provider.businessBio || "").trim(),
           type: "Solo",
           level: provider.sellerLevel || "New",
           sellerLevel: provider.sellerLevel || "New",
           rating: Number(provider.averageRating) || 0,
           reviewCount: Number(provider.reviewCount) || 0,
         },
+        reviews,
       },
     });
   } catch (error) {

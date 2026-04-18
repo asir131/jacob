@@ -38,6 +38,13 @@ const gigSchema = new mongoose.Schema(
       default: "",
       trim: true,
     },
+    expertType: {
+      type: String,
+      enum: ["solo", "team"],
+      default: "solo",
+      trim: true,
+      lowercase: true,
+    },
     description: {
       type: String,
       default: "",
