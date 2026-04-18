@@ -68,6 +68,61 @@ const resolveAddressFromCoordinates = async (lat, lng) => {
   }
 };
 
+const geocodeAddress = async (address = "") => {
+  const query = String(address || "").trim();
+  if (!query) return null;
+
+  try {
+    const response = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(query)}`,
+      {
+        headers: {
+          "User-Agent": "jacob-backend/1.0",
+        },
+      }
+    );
+    if (!response.ok) return null;
+
+    const [result] = await response.json();
+    const lat = Number(result?.lat);
+    const lng = Number(result?.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+    return { lat, lng };
+  } catch {
+    return null;
+  }
+};
+
+const calculateDistanceKm = (fromLat, fromLng, toLat, toLng) => {
+  const lat1 = Number(fromLat);
+  const lng1 = Number(fromLng);
+  const lat2 = Number(toLat);
+  const lng2 = Number(toLng);
+
+  if (![lat1, lng1, lat2, lng2].every((value) => Number.isFinite(value))) {
+    return null;
+  }
+
+  const toRadians = (value) => (value * Math.PI) / 180;
+  const earthRadiusKm = 6371;
+  const deltaLat = toRadians(lat2 - lat1);
+  const deltaLng = toRadians(lng2 - lng1);
+  const a =
+    Math.sin(deltaLat / 2) ** 2 +
+    Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(deltaLng / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return Number((earthRadiusKm * c).toFixed(1));
+};
+
+const normalizePoint = (lat, lng) => {
+  const normalizedLat = Number(lat);
+  const normalizedLng = Number(lng);
+  if (!Number.isFinite(normalizedLat) || !Number.isFinite(normalizedLng)) return null;
+  return { lat: normalizedLat, lng: normalizedLng };
+};
+
 
 const buildOrderSummary = (order) => {
   if (!order) return null;
@@ -803,7 +858,7 @@ const createOrder = async (req, res, next) => {
     }
 
     const gig = await Gig.findById(gigId)
-      .select("_id title providerId categoryName")
+      .select("_id title providerId categoryName baseCity locationLat locationLng travelRadiusKm")
       .lean();
 
     if (!gig || String(gig.providerId) === String(req.user.id)) {
@@ -813,10 +868,46 @@ const createOrder = async (req, res, next) => {
       });
     }
 
-    const clientProfile = await User.findById(req.user.id).select("_id address locationLat locationLng").lean();
+    const [clientProfile, providerProfile] = await Promise.all([
+      User.findById(req.user.id).select("_id address locationLat locationLng").lean(),
+      User.findById(gig.providerId).select("_id locationLat locationLng serviceLocationLat serviceLocationLng").lean(),
+    ]);
     const clientAddressSnapshot =
       String(clientProfile?.address || "").trim() ||
       (await resolveAddressFromCoordinates(clientProfile?.locationLat, clientProfile?.locationLng));
+    const providerPoint =
+      normalizePoint(gig?.locationLat, gig?.locationLng) ||
+      normalizePoint(providerProfile?.serviceLocationLat, providerProfile?.serviceLocationLng) ||
+      normalizePoint(providerProfile?.locationLat, providerProfile?.locationLng);
+    const clientPoint =
+      (await geocodeAddress(clientAddressSnapshot)) ||
+      normalizePoint(clientProfile?.locationLat, clientProfile?.locationLng);
+    const providerTravelRadiusKm = Number(gig?.travelRadiusKm);
+    const effectiveTravelRadiusKm =
+      Number.isFinite(providerTravelRadiusKm) && providerTravelRadiusKm > 0 ? providerTravelRadiusKm : null;
+
+    if (effectiveTravelRadiusKm !== null && (!providerPoint || !clientPoint)) {
+      return res.status(400).json({
+        success: false,
+        message: "Client or provider location is missing for radius validation.",
+      });
+    }
+
+    if (providerPoint && clientPoint && effectiveTravelRadiusKm !== null) {
+      const distanceKm = calculateDistanceKm(
+        providerPoint.lat,
+        providerPoint.lng,
+        clientPoint.lat,
+        clientPoint.lng
+      );
+
+      if (typeof distanceKm === "number" && distanceKm > effectiveTravelRadiusKm) {
+        return res.status(403).json({
+          success: false,
+          message: `You are outside this provider's ${effectiveTravelRadiusKm} km service radius.`,
+        });
+      }
+    }
 
     const order = await Order.create({
       orderNumber: createOrderNumber(),

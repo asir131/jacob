@@ -4,6 +4,7 @@ const GigRequest = require("../models/GigRequest");
 const mongoose = require("mongoose");
 const cloudinary = require("../config/cloudinary");
 const slugify = require("../utils/slugify");
+const extractZipCode = require("../utils/extractZipCode");
 const { emitToRole, emitToUser } = require("../socket");
 
 const DEFAULT_CATEGORY_ICON = "ShieldCheck";
@@ -903,10 +904,12 @@ const calculateDistanceKm = (fromLat, fromLng, toLat, toLng) => {
 const listPublicServices = async (req, res, next) => {
   try {
     const page = Math.max(1, Number(req.query.page) || 1);
-    const limit = Math.max(1, Math.min(50, Number(req.query.limit) || 9));
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 9));
     const radiusKm = Math.max(1, Number(req.query.radiusKm) || 25);
+    const requireCoverage = String(req.query.requireCoverage || "").trim().toLowerCase() === "true";
     const categorySlug = String(req.query.categorySlug || "").trim().toLowerCase();
     const search = String(req.query.search || "").trim().toLowerCase();
+    const zipCode = extractZipCode(req.query.zipCode);
     const clientLat = req.query.lat === undefined ? null : Number(req.query.lat);
     const clientLng = req.query.lng === undefined ? null : Number(req.query.lng);
     const hasClientLocation = Number.isFinite(clientLat) && Number.isFinite(clientLng);
@@ -917,7 +920,10 @@ const listPublicServices = async (req, res, next) => {
     }
 
     const gigs = await Gig.find(query)
-      .populate("providerId", "_id firstName lastName avatar serviceLocationLat serviceLocationLng locationLat locationLng sellerLevel averageRating reviewCount")
+      .populate(
+        "providerId",
+        "_id firstName lastName avatar address serviceCity serviceLocationLat serviceLocationLng locationLat locationLng sellerLevel averageRating reviewCount"
+      )
       .sort({ createdAt: -1 })
       .lean();
 
@@ -959,6 +965,11 @@ const listPublicServices = async (req, res, next) => {
             : null;
 
         const providerName = `${provider.firstName || ""} ${provider.lastName || ""}`.trim() || "Provider";
+        const resolvedBaseCity =
+          String(gig.baseCity || "").trim() ||
+          String(provider.serviceCity || "").trim() ||
+          String(provider.address || "").trim();
+        const itemZipCode = extractZipCode(resolvedBaseCity);
 
         return {
           id: gig._id,
@@ -966,6 +977,8 @@ const listPublicServices = async (req, res, next) => {
           categorySlug: gig.categorySlug || "",
           categoryName: gig.categoryName || "",
           image: Array.isArray(gig.images) && gig.images[0] ? gig.images[0] : "",
+          baseCity: resolvedBaseCity,
+          zipCode: itemZipCode,
           avgPackagePrice,
           distanceKm,
           providerTravelRadiusKm: normalizedProviderTravelRadiusKm,
@@ -990,10 +1003,18 @@ const listPublicServices = async (req, res, next) => {
         );
       })
       .filter((item) => {
+        if (!zipCode) return true;
+        return item.zipCode === zipCode;
+      })
+      .filter((item) => {
+        if (requireCoverage && !hasClientLocation) return false;
         if (!hasClientLocation) return true;
         if (typeof item.distanceKm !== "number") return false;
-        if (item.distanceKm > radiusKm) return false;
         if (typeof item.providerTravelRadiusKm !== "number") return false;
+        if (requireCoverage) {
+          return item.distanceKm <= item.providerTravelRadiusKm;
+        }
+        if (item.distanceKm > radiusKm) return false;
         return item.distanceKm <= item.providerTravelRadiusKm;
       });
 
@@ -1048,7 +1069,7 @@ const getPublicServiceById = async (req, res, next) => {
     const gig = await Gig.findOne({ _id: id, status: "published" })
       .populate(
         "providerId",
-        "_id firstName lastName avatar serviceLocationLat serviceLocationLng locationLat locationLng sellerLevel averageRating reviewCount"
+        "_id firstName lastName avatar address serviceCity serviceLocationLat serviceLocationLng locationLat locationLng sellerLevel averageRating reviewCount"
       )
       .lean();
 
@@ -1061,6 +1082,11 @@ const getPublicServiceById = async (req, res, next) => {
 
     const provider = gig.providerId || {};
     const providerName = `${provider.firstName || ""} ${provider.lastName || ""}`.trim() || "Provider";
+    const resolvedBaseCity =
+      String(gig.baseCity || "").trim() ||
+      String(provider.serviceCity || "").trim() ||
+      String(provider.address || "").trim();
+    const zipCode = extractZipCode(resolvedBaseCity);
     const packages = Array.isArray(gig.packages) ? gig.packages : [];
     const validPrices = packages
       .map((item) => Number(item?.price) || 0)
@@ -1080,7 +1106,8 @@ const getPublicServiceById = async (req, res, next) => {
         description: gig.description || "",
         requirements: gig.requirements || "",
         images: Array.isArray(gig.images) ? gig.images : [],
-        baseCity: gig.baseCity || "",
+        baseCity: resolvedBaseCity,
+        zipCode,
         locationLat: typeof gig.locationLat === "number" ? gig.locationLat : null,
         locationLng: typeof gig.locationLng === "number" ? gig.locationLng : null,
         travelRadiusKm: typeof gig.travelRadiusKm === "number" ? gig.travelRadiusKm : null,
