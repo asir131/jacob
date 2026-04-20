@@ -203,6 +203,8 @@ const buildOrderSummary = (order) => {
       phone: provider.phone || "",
       address: provider.address || "",
       avatar: provider.avatar || "",
+      averageRating: Number(provider.averageRating) || 0,
+      reviewCount: Number(provider.reviewCount) || 0,
       completedOrders: Number(provider.completedOrders) || 0,
       walletBalance: Number(provider.walletBalance) || 0,
       totalEarnings: Number(provider.totalEarnings) || 0,
@@ -1172,7 +1174,7 @@ const getClientOrderDetail = async (req, res, next) => {
     const order = await Order.findOne(query)
       .populate("gigId", "_id title categoryName images")
       .populate("clientId", "_id firstName lastName email phone address avatar locationLat locationLng")
-      .populate("providerId", "_id firstName lastName email phone address avatar")
+      .populate("providerId", "_id firstName lastName email phone address avatar averageRating reviewCount")
       .lean();
 
     if (!order) {
