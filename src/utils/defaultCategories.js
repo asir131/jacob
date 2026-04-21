@@ -64,8 +64,8 @@ const DEFAULT_CATEGORIES = [
     bgGradient: "from-amber-50 to-white",
   },
   {
-    name: "Shifting",
-    slug: "shifting",
+    name: "Shipping",
+    slug: "shipping",
     iconName: "Truck",
     description: "Safe and efficient home and office moving services with professional movers.",
     color: "bg-purple-50 text-purple-500",

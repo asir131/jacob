@@ -105,7 +105,7 @@ const signup = async (req, res, next) => {
     if (existingUser) {
       return res.status(409).json({
         success: false,
-        message: "User already exists with this email.",
+        message: "Email already in use",
       });
     }
 
@@ -199,7 +199,7 @@ const verifySignupOtp = async (req, res, next) => {
     if (error.code === 11000) {
       return res.status(409).json({
         success: false,
-        message: "User already verified with this email.",
+        message: "Email already in use",
       });
     }
     next(error);

@@ -1,12 +1,16 @@
 const mongoose = require("mongoose");
 const Category = require("../models/Category");
 const Gig = require("../models/Gig");
+const GigRequest = require("../models/GigRequest");
+const ServiceRequest = require("../models/ServiceRequest");
 const slugify = require("../utils/slugify");
 const { DEFAULT_CATEGORIES } = require("../utils/defaultCategories");
 
+const resolveCategoryName = (name = "") => String(name || "");
+
 const normalizeCategory = (category, countMap = new Map()) => ({
   _id: String(category._id),
-  name: category.name || "",
+  name: resolveCategoryName(category.name),
   slug: category.slug || "",
   description: category.description || "",
   iconName: category.iconName || "ShieldCheck",
@@ -19,7 +23,82 @@ const normalizeCategory = (category, countMap = new Map()) => ({
   updatedAt: category.updatedAt || null,
 });
 
+const migrateShippingCategory = async () => {
+  const shippingCategory = await Category.findOne({ slug: "shipping" });
+  const shiftingCategories = await Category.find({
+    $or: [{ slug: "shifting" }, { name: "Shifting" }],
+  }).sort({ createdAt: 1, _id: 1 });
+
+  if (!shiftingCategories.length) return;
+
+  if (shippingCategory) {
+    const shiftingIds = shiftingCategories
+      .map((category) => category?._id)
+      .filter(Boolean);
+
+    await Promise.all([
+      Category.deleteMany({ _id: { $in: shiftingIds } }),
+      GigRequest.updateMany(
+        { categoryRef: { $in: shiftingIds } },
+        { $set: { categoryRef: shippingCategory._id } }
+      ),
+      ServiceRequest.updateMany(
+        { categoryId: { $in: shiftingIds } },
+        { $set: { categoryId: shippingCategory._id } }
+      ),
+    ]);
+
+    return;
+  }
+
+  const [primaryCategory, ...duplicateCategories] = shiftingCategories;
+  primaryCategory.slug = "shipping";
+  primaryCategory.name = "Shipping";
+  await primaryCategory.save();
+
+  if (!duplicateCategories.length) return;
+
+  const duplicateIds = duplicateCategories
+    .map((category) => category?._id)
+    .filter(Boolean);
+
+  await Promise.all([
+    Category.deleteMany({ _id: { $in: duplicateIds } }),
+    GigRequest.updateMany(
+      { categoryRef: { $in: duplicateIds } },
+      { $set: { categoryRef: primaryCategory._id } }
+    ),
+    ServiceRequest.updateMany(
+      { categoryId: { $in: duplicateIds } },
+      { $set: { categoryId: primaryCategory._id } }
+    ),
+  ]);
+};
+
 const ensureDefaultCategories = async () => {
+  await Promise.all([
+    Gig.updateMany(
+      {
+        $or: [{ categorySlug: "shifting" }, { categoryName: "Shifting" }],
+      },
+      { $set: { categorySlug: "shipping", categoryName: "Shipping" } }
+    ),
+    GigRequest.updateMany(
+      {
+        $or: [{ categorySlug: "shifting" }, { categoryName: "Shifting" }],
+      },
+      { $set: { categorySlug: "shipping", categoryName: "Shipping" } }
+    ),
+    ServiceRequest.updateMany(
+      {
+        $or: [{ categorySlug: "shifting" }, { categoryName: "Shifting" }],
+      },
+      { $set: { categorySlug: "shipping", categoryName: "Shipping" } }
+    ),
+  ]);
+
+  await migrateShippingCategory();
+
   await Promise.all(
     DEFAULT_CATEGORIES.map((item) =>
       Category.findOneAndUpdate(
