@@ -945,7 +945,7 @@ const createOrder = async (req, res, next) => {
       if (typeof distanceKm === "number" && distanceKm > effectiveTravelRadiusKm) {
         return res.status(403).json({
           success: false,
-          message: `You are outside this provider's ${effectiveTravelRadiusKm} km service radius.`,
+          message: `You are outside this provider's ${(effectiveTravelRadiusKm / 1.60934).toFixed(1)} mile service radius.`,
         });
       }
     }
