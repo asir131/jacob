@@ -11,8 +11,49 @@ const { ensureConversationForOrder } = require("./chatController");
 const WithdrawalRequest = require("../models/WithdrawalRequest");
 
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
-const APP_URL = process.env.CLIENT_APP_URL || process.env.FRONTEND_URL || "http://localhost:3000";
+const WEB_APP_URL = process.env.CLIENT_APP_URL || process.env.FRONTEND_URL || "http://localhost:3000";
+const MOBILE_APP_URL = process.env.MOBILE_APP_URL || "jaco://booking-details";
 const ADMIN_FEE_RATE = 0.1;
+
+const buildClientCheckoutRedirectUrl = (baseUrl, params = {}) => {
+  const searchParams = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === "") return;
+    searchParams.append(key, String(value));
+  });
+
+  const queryString = searchParams.toString();
+  if (!queryString) return baseUrl;
+  return `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}${queryString}`;
+};
+
+const resolveClientCheckoutRedirects = (req, order) => {
+  const clientPlatform = String(req.headers["x-client-platform"] || "").toLowerCase();
+  const isMobileCheckout = clientPlatform === "mobile";
+
+  if (isMobileCheckout) {
+    const mobileBaseUrl = MOBILE_APP_URL || "jaco://booking-details";
+    return {
+      successUrl: buildClientCheckoutRedirectUrl(mobileBaseUrl, {
+        id: order._id?.toString(),
+        role: "client",
+        checkout: "success",
+        session_id: "{CHECKOUT_SESSION_ID}",
+      }),
+      cancelUrl: buildClientCheckoutRedirectUrl(mobileBaseUrl, {
+        id: order._id?.toString(),
+        role: "client",
+        checkout: "cancel",
+      }),
+    };
+  }
+
+  const orderPath = `/client/orders/${order.orderNumber || order._id.toString()}`;
+  return {
+    successUrl: `${WEB_APP_URL}${orderPath}?session_id={CHECKOUT_SESSION_ID}`,
+    cancelUrl: `${WEB_APP_URL}${orderPath}`,
+  };
+};
 
 const uploadBufferToCloudinary = (buffer, folder) => {
   return new Promise((resolve, reject) => {
@@ -1833,10 +1874,12 @@ const createClientCheckoutSession = async (req, res, next) => {
       packageName: String(order.packageName || ""),
     };
 
+    const { successUrl, cancelUrl } = resolveClientCheckoutRedirects(req, order);
+
     const session = await stripeRequest("/v1/checkout/sessions", {
       mode: "payment",
-      success_url: `${APP_URL}/client/orders/${order.orderNumber || order._id.toString()}?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${APP_URL}/client/orders/${order.orderNumber || order._id.toString()}`,
+      success_url: successUrl,
+      cancel_url: cancelUrl,
       client_reference_id: String(order._id),
       customer_email: req.user.email || undefined,
       "line_items[0][price_data][currency]": "usd",
