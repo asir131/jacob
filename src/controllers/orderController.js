@@ -181,17 +181,73 @@ const buildPackagePricing = (baseAmount) => {
   };
 };
 
+const resolveRepeatRootId = (order) => {
+  if (!order) return null;
+  return order.repeatRootOrderId?._id || order.repeatRootOrderId || order._id || null;
+};
+
+const attachRepeatCounts = async (orders = []) => {
+  if (!Array.isArray(orders) || orders.length === 0) return [];
+
+  const rootIds = Array.from(
+    new Set(
+      orders
+        .map((order) => String(resolveRepeatRootId(order) || ""))
+        .filter((value) => mongoose.Types.ObjectId.isValid(value))
+    )
+  );
+
+  if (!rootIds.length) {
+    return orders.map((order) => ({ ...order, repeatOrderCount: Number(order?.repeatOrderCount) || 1 }));
+  }
+
+  const rootObjectIds = rootIds.map((id) => new mongoose.Types.ObjectId(id));
+  const counts = await Order.aggregate([
+    {
+      $match: {
+        $or: [{ _id: { $in: rootObjectIds } }, { repeatRootOrderId: { $in: rootObjectIds } }],
+      },
+    },
+    {
+      $project: {
+        rootId: { $ifNull: ["$repeatRootOrderId", "$_id"] },
+      },
+    },
+    {
+      $group: {
+        _id: "$rootId",
+        count: { $sum: 1 },
+      },
+    },
+  ]);
+
+  const countMap = new Map(counts.map((entry) => [String(entry._id), Number(entry.count) || 1]));
+  return orders.map((order) => {
+    const rootId = String(resolveRepeatRootId(order) || "");
+    return {
+      ...order,
+      repeatOrderCount: countMap.get(rootId) || Number(order?.repeatOrderCount) || 1,
+    };
+  });
+};
 
 const buildOrderSummary = (order) => {
   if (!order) return null;
   const client = order.clientId || {};
   const provider = order.providerId || {};
   const gig = order.gigId || {};
+  const repeatRootOrderId = resolveRepeatRootId(order);
+  const repeatIteration = Math.max(1, Number(order.repeatIteration) || 1);
+  const repeatOrderCount = Math.max(repeatIteration, Number(order.repeatOrderCount) || 1);
 
   return {
     id: order._id,
     orderNumber: order.orderNumber,
     conversationId: order.conversationId || null,
+    repeatRootOrderId,
+    repeatSourceOrderId: order.repeatSourceOrderId?._id || order.repeatSourceOrderId || null,
+    repeatIteration,
+    repeatOrderCount,
     orderName: order.packageTitle || order.categoryName || gig.title || "Service order",
     categoryName: String(order.categoryName || gig.categoryName || "").trim(),
       status: order.status,
@@ -227,6 +283,7 @@ const buildOrderSummary = (order) => {
     providerEarningsAmount: Number(order.providerEarningsAmount) || Number(order.packagePrice) || 0,
     paidAt: order.paidAt || null,
     isRequestedOrder: !gig._id || !gig.title,
+    canRequestRepeatOrder: order.status === "completed",
     client: {
       id: client._id || "",
       name: `${client.firstName || ""} ${client.lastName || ""}`.trim() || "Client",
@@ -1094,6 +1151,7 @@ const listProviderOrders = async (req, res, next) => {
         .lean(),
       Order.countDocuments(query),
     ]);
+    const ordersWithRepeatCounts = await attachRepeatCounts(orders);
 
     const totalPages = Math.max(1, Math.ceil(totalItems / limit));
 
@@ -1101,7 +1159,7 @@ const listProviderOrders = async (req, res, next) => {
       success: true,
       message: "Provider orders fetched successfully.",
       data: {
-        items: orders.map(buildOrderSummary),
+        items: ordersWithRepeatCounts.map(buildOrderSummary),
         pagination: {
           page,
           limit,
@@ -1169,6 +1227,7 @@ const listClientOrders = async (req, res, next) => {
         .lean(),
       Order.countDocuments(query),
     ]);
+    const ordersWithRepeatCounts = await attachRepeatCounts(orders);
 
     const totalPages = Math.max(1, Math.ceil(totalItems / limit));
 
@@ -1176,7 +1235,7 @@ const listClientOrders = async (req, res, next) => {
       success: true,
       message: "Client orders fetched successfully.",
       data: {
-        items: orders.map(buildOrderSummary),
+        items: ordersWithRepeatCounts.map(buildOrderSummary),
         pagination: {
           page,
           limit,
@@ -1234,13 +1293,15 @@ const getClientOrderDetail = async (req, res, next) => {
       });
     }
 
-    const normalizedOrder = buildOrderSummary({
+    const [orderWithRepeatCount] = await attachRepeatCounts([{
       ...order,
       providerId: {
         ...(order.providerId || {}),
         completedOrders,
       },
-    });
+    }]);
+
+    const normalizedOrder = buildOrderSummary(orderWithRepeatCount);
 
     return res.status(200).json({
       success: true,
@@ -1279,11 +1340,13 @@ const getProviderOrderDetail = async (req, res, next) => {
       });
     }
 
+    const [orderWithRepeatCount] = await attachRepeatCounts([order]);
+
     return res.status(200).json({
       success: true,
       message: "Order fetched successfully.",
       data: {
-        order: buildOrderSummary(order),
+        order: buildOrderSummary(orderWithRepeatCount),
       },
     });
   } catch (error) {

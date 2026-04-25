@@ -4,8 +4,9 @@ const Category = require("../models/Category");
 const ServiceRequest = require("../models/ServiceRequest");
 const Order = require("../models/Order");
 const User = require("../models/User");
-const { emitToUser } = require("../socket");
+const { emitToRole, emitToUser } = require("../socket");
 const { ensureConversationForOrder } = require("./chatController");
+const slugify = require("../utils/slugify");
 
 const uploadBufferToCloudinary = (buffer, folder) => {
   return new Promise((resolve, reject) => {
@@ -51,6 +52,8 @@ const createOrderNumber = () => {
     .padStart(4, "0");
   return `ORD-${Date.now()}-${random}`;
 };
+
+const createNotificationId = (suffix = "") => `NTF-${Date.now()}${suffix ? `-${suffix}` : ""}`;
 
 const normalizePoint = (lat, lng) => {
   const nextLat = toFiniteNumber(lat);
@@ -141,6 +144,17 @@ const buildRequestSummary = (request, viewerId = null) => {
     categoryId: category._id || request.categoryId || null,
     categorySlug: request.categorySlug || "",
     categoryName: request.categoryName || category.name || "",
+    requestSource: request.requestSource || "existing_category",
+    requestType: request.requestSource === "custom_category" ? "custom" : "matched",
+    customCategoryName: request.customCategoryName || "",
+    customCategoryDescription: request.customCategoryDescription || "",
+    customCategoryApprovalStatus: request.customCategoryApprovalStatus || "not_requested",
+    customCategoryRequestedAt: request.customCategoryRequestedAt || null,
+    customCategoryReviewedAt: request.customCategoryReviewedAt || null,
+    customCategoryRejectionReason: request.customCategoryRejectionReason || "",
+    pendingAdminCategoryApproval:
+      request.requestSource === "custom_category" &&
+      String(request.customCategoryApprovalStatus || "not_requested") !== "approved",
     serviceAddress: request.serviceAddress || "",
     serviceLocationLat: typeof request.serviceLocationLat === "number" ? request.serviceLocationLat : null,
     serviceLocationLng: typeof request.serviceLocationLng === "number" ? request.serviceLocationLng : null,
@@ -268,30 +282,63 @@ const createServiceRequest = async (req, res, next) => {
       });
     }
 
-    const categorySlug = String(req.body.categorySlug || "").trim().toLowerCase();
+    const requestCustomCategory = String(req.body.requestCustomCategory || "").trim().toLowerCase() === "true";
+    const categorySlugInput = String(req.body.categorySlug || "").trim().toLowerCase();
     const categoryNameInput = String(req.body.categoryName || "").trim();
+    const customCategoryName = String(req.body.customCategoryName || "").trim();
+    const customCategoryDescription = String(req.body.customCategoryDescription || "").trim();
     const serviceAddress = String(req.body.serviceAddress || "").trim();
     const description = String(req.body.description || "").trim();
     const preferredTime = String(req.body.preferredTime || "").trim();
     const budget = Number(req.body.budget || 0);
     const preferredDate = String(req.body.preferredDate || "").trim();
 
-    if (!categorySlug || !serviceAddress || !description || !preferredTime || !Number.isFinite(budget) || budget <= 0) {
+    if (!serviceAddress || !description || !preferredTime || !Number.isFinite(budget) || budget <= 0) {
       return res.status(400).json({
         success: false,
         message: "Please fill all required request fields.",
       });
     }
 
-    const category =
-      (await Category.findOne({ slug: categorySlug, status: "approved" }).lean()) ||
-      (await Category.findOne({ slug: categorySlug }).lean());
+    let category = null;
+    let categorySlug = categorySlugInput;
+    let categoryName = categoryNameInput;
+    let requestSource = "existing_category";
+    let customCategoryApprovalStatus = "not_requested";
 
-    if (!category && !categoryNameInput) {
-      return res.status(404).json({
-        success: false,
-        message: "Selected category was not found.",
-      });
+    if (requestCustomCategory) {
+      categoryName = customCategoryName || categoryNameInput;
+      categorySlug = slugify(categoryName);
+      requestSource = "custom_category";
+      customCategoryApprovalStatus = "pending";
+
+      if (!categoryName || !categorySlug) {
+        return res.status(400).json({
+          success: false,
+          message: "Please enter the custom category you want to request.",
+        });
+      }
+    } else {
+      if (!categorySlugInput) {
+        return res.status(400).json({
+          success: false,
+          message: "Please choose an existing service category.",
+        });
+      }
+
+      category =
+        (await Category.findOne({ slug: categorySlugInput, status: "approved" }).lean()) ||
+        (await Category.findOne({ slug: categorySlugInput }).lean());
+
+      if (!category) {
+        return res.status(404).json({
+          success: false,
+          message: "Selected category was not found.",
+        });
+      }
+
+      categorySlug = String(category.slug || categorySlugInput).trim().toLowerCase();
+      categoryName = String(category.name || categoryNameInput || categorySlug).trim();
     }
 
     const clientProfile = await User.findById(req.user.id)
@@ -311,7 +358,12 @@ const createServiceRequest = async (req, res, next) => {
       clientId: req.user.id,
       categoryId: category?._id || null,
       categorySlug,
-      categoryName: String(category?.name || categoryNameInput || categorySlug).trim(),
+      categoryName,
+      requestSource,
+      customCategoryName: requestCustomCategory ? categoryName : "",
+      customCategoryDescription: requestCustomCategory ? customCategoryDescription : "",
+      customCategoryApprovalStatus,
+      customCategoryRequestedAt: requestCustomCategory ? new Date() : null,
       serviceAddress,
       serviceLocationLat: requestCoordinates?.lat ?? null,
       serviceLocationLng: requestCoordinates?.lng ?? null,
@@ -323,54 +375,43 @@ const createServiceRequest = async (req, res, next) => {
       status: "open",
     });
 
-    const [providers] = await Promise.all([
-      User.find({ role: "provider" })
-        .select("_id firstName lastName avatar email address locationLat locationLng serviceLocationLat serviceLocationLng sellerLevel averageRating")
-        .lean(),
-    ]);
+    const notifiedProviders = await notifyNearbyProvidersForRequest({
+      request: serviceRequest.toObject(),
+      clientProfile,
+    });
 
-    const nearbyProviders = providers
-      .map((provider) => {
-        const providerCoordinates = resolveProviderCoordinates(provider);
-        const distanceKm = haversineDistanceKm(requestCoordinates, providerCoordinates);
-        return {
-          provider,
-          distanceKm,
-        };
-      })
-      .filter(({ distanceKm }) => Number.isFinite(distanceKm) && distanceKm <= 30)
-      .sort((a, b) => (a.distanceKm || 0) - (b.distanceKm || 0));
-
-    nearbyProviders.forEach(({ provider, distanceKm }) => {
-      emitToUser(String(provider._id), "notification:new", {
-        id: `NTF-${Date.now()}-${provider._id}`,
-        type: "system",
-        title: "New service request nearby",
-        description: `${clientProfile?.firstName || "A client"} posted a new service request in your area.`,
-        data: {
-          notificationType: "service_request_created",
-          requestId: String(serviceRequest._id),
-          requestNumber: serviceRequest.requestNumber,
-          categorySlug: serviceRequest.categorySlug,
-          categoryName: serviceRequest.categoryName,
-          distanceKm,
-          targetPath: "/provider/requests",
-        },
-        unread: true,
-        createdAt: new Date().toISOString(),
-      });
+    emitToRole("superAdmin", "notification:new", {
+      id: createNotificationId(String(serviceRequest._id)),
+      type: "system",
+      title: requestCustomCategory ? "New custom category request" : "New service request",
+      description: requestCustomCategory
+        ? `${clientProfile?.firstName || "A client"} requested a new category: ${serviceRequest.categoryName || "Custom category"}.`
+        : `${clientProfile?.firstName || "A client"} requested ${serviceRequest.categoryName || "a service"}.`,
+      data: {
+        notificationType: requestCustomCategory ? "custom_category_request_created" : "service_request_created",
+        requestId: String(serviceRequest._id),
+        requestNumber: serviceRequest.requestNumber,
+        categorySlug: serviceRequest.categorySlug,
+        categoryName: serviceRequest.categoryName,
+        providerName: `${clientProfile?.firstName || ""} ${clientProfile?.lastName || ""}`.trim() || clientProfile?.email || "Client",
+        targetPath: `/service-requests?requestId=${String(serviceRequest._id)}`,
+      },
+      unread: true,
+      createdAt: new Date().toISOString(),
     });
 
     return res.status(201).json({
       success: true,
-      message: "Service request created successfully.",
+      message: requestCustomCategory
+        ? "Custom category request submitted successfully. Admin review is pending."
+        : "Service request created successfully.",
       data: {
         request: buildRequestSummary({
           ...serviceRequest.toObject(),
           clientId: clientProfile || null,
           categoryId: category || null,
         }),
-        notifiedProviders: nearbyProviders.length,
+        notifiedProviders,
       },
     });
   } catch (error) {
@@ -487,6 +528,10 @@ const listProviderServiceRequests = async (req, res, next) => {
       status: "open",
       acceptedProviderId: null,
       ignoredByProviderIds: { $ne: req.user.id },
+      $or: [
+        { requestSource: { $ne: "custom_category" } },
+        { customCategoryApprovalStatus: "approved" },
+      ],
       ...(search
         ? {
             $or: [
@@ -561,6 +606,10 @@ const acceptServiceRequest = async (req, res, next) => {
       status: "open",
       acceptedProviderId: null,
       ignoredByProviderIds: { $ne: req.user.id },
+      $or: [
+        { requestSource: { $ne: "custom_category" } },
+        { customCategoryApprovalStatus: "approved" },
+      ],
     })
       .populate("clientId", "_id firstName lastName avatar email address locationLat locationLng")
       .populate("categoryId", "_id name slug iconName")
@@ -580,7 +629,7 @@ const acceptServiceRequest = async (req, res, next) => {
     });
 
     emitToUser(String(request.clientId?._id || request.clientId), "notification:new", {
-      id: `NTF-${Date.now()}`,
+      id: createNotificationId(),
       type: "success",
       title: "Your service request was accepted",
       description: `A provider accepted your ${request.categoryName || "service"} request.`,
@@ -650,10 +699,245 @@ const ignoreServiceRequest = async (req, res, next) => {
   }
 };
 
+const shouldPublishToProviders = (request = {}) => {
+  if (String(request.status || "open") !== "open") return false;
+  if (String(request.requestSource || "existing_category") !== "custom_category") return true;
+  return String(request.customCategoryApprovalStatus || "not_requested") === "approved";
+};
+
+const notifyNearbyProvidersForRequest = async ({ request, clientProfile }) => {
+  if (!shouldPublishToProviders(request)) return 0;
+
+  const requestCoordinates = normalizePoint(request.serviceLocationLat, request.serviceLocationLng);
+  if (!requestCoordinates) return 0;
+
+  const providers = await User.find({ role: "provider" })
+    .select("_id firstName lastName avatar email address locationLat locationLng serviceLocationLat serviceLocationLng sellerLevel averageRating")
+    .lean();
+
+  const nearbyProviders = providers
+    .map((provider) => {
+      const providerCoordinates = resolveProviderCoordinates(provider);
+      const distanceKm = haversineDistanceKm(requestCoordinates, providerCoordinates);
+      return { provider, distanceKm };
+    })
+    .filter(({ distanceKm }) => Number.isFinite(distanceKm) && distanceKm <= 30)
+    .sort((a, b) => (a.distanceKm || 0) - (b.distanceKm || 0));
+
+  nearbyProviders.forEach(({ provider, distanceKm }) => {
+    emitToUser(String(provider._id), "notification:new", {
+      id: createNotificationId(String(provider._id)),
+      type: "system",
+      title: "New service request nearby",
+      description: `${clientProfile?.firstName || "A client"} posted a new service request in your area.`,
+      data: {
+        notificationType: "service_request_created",
+        requestId: String(request._id),
+        requestNumber: request.requestNumber,
+        categorySlug: request.categorySlug,
+        categoryName: request.categoryName,
+        distanceKm,
+        targetPath: "/provider/requests",
+      },
+      unread: true,
+      createdAt: new Date().toISOString(),
+    });
+  });
+
+  return nearbyProviders.length;
+};
+
+const findOrCreateApprovedCategoryForRequest = async ({ serviceRequest, adminUserId }) => {
+  const requestedName = String(serviceRequest.customCategoryName || serviceRequest.categoryName || "").trim();
+  const requestedDescription = String(serviceRequest.customCategoryDescription || "").trim();
+  const requestedSlug = slugify(serviceRequest.customCategoryName || serviceRequest.categoryName || serviceRequest.categorySlug || "");
+
+  let category = await Category.findOne({ slug: requestedSlug });
+  if (!category) {
+    category = await Category.create({
+      name: requestedName,
+      slug: requestedSlug,
+      description: requestedDescription,
+      isCustom: true,
+      status: "approved",
+      createdBy: serviceRequest.clientId || null,
+      approvedBy: adminUserId || null,
+      approvedAt: new Date(),
+    });
+    return category;
+  }
+
+  category.name = requestedName || category.name;
+  if (requestedDescription) {
+    category.description = requestedDescription;
+  }
+  category.isCustom = true;
+  category.status = "approved";
+  category.approvedBy = adminUserId || category.approvedBy || null;
+  category.approvedAt = new Date();
+  await category.save();
+  return category;
+};
+
+const listAdminServiceRequests = async (req, res, next) => {
+  try {
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.max(1, Math.min(50, Number(req.query.limit) || 10));
+    const search = String(req.query.search || "").trim();
+    const status = String(req.query.status || "all").trim().toLowerCase();
+    const requestType = String(req.query.requestType || "all").trim().toLowerCase();
+    const skip = (page - 1) * limit;
+
+    const filters = {};
+
+    if (status !== "all" && ["open", "accepted", "cancelled"].includes(status)) {
+      filters.status = status;
+    }
+
+    if (requestType === "custom") {
+      filters.requestSource = "custom_category";
+    } else if (requestType === "matched") {
+      filters.requestSource = "existing_category";
+    }
+
+    if (search) {
+      const regex = new RegExp(escapeRegex(search), "i");
+      filters.$or = [
+        { requestNumber: regex },
+        { categoryName: regex },
+        { categorySlug: regex },
+        { serviceAddress: regex },
+        { description: regex },
+        { preferredTime: regex },
+        { status: regex },
+      ];
+    }
+
+    const [items, totalItems] = await Promise.all([
+      ServiceRequest.find(filters)
+        .populate("clientId", "_id firstName lastName avatar email phone address locationLat locationLng")
+        .populate("acceptedProviderId", "_id firstName lastName avatar sellerLevel averageRating email")
+        .populate("linkedOrderId", "_id orderNumber status paymentStatus completedAt")
+        .populate("categoryId", "_id name slug iconName")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      ServiceRequest.countDocuments(filters),
+    ]);
+
+    const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+
+    return res.status(200).json({
+      success: true,
+      message: "Admin service requests fetched successfully.",
+      data: {
+        items: items.map((item) => buildRequestSummary(item)),
+        pagination: {
+          page,
+          limit,
+          totalItems,
+          totalPages,
+          hasNextPage: page < totalPages,
+          hasPrevPage: page > 1,
+        },
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const approveServiceRequestCustomCategory = async (req, res, next) => {
+  try {
+    const request = await ServiceRequest.findById(req.params.id)
+      .populate("clientId", "_id firstName lastName email avatar phone address locationLat locationLng")
+      .populate("categoryId", "_id name slug iconName");
+
+    if (!request) {
+      return res.status(404).json({
+        success: false,
+        message: "Service request not found.",
+      });
+    }
+
+    if (request.requestSource !== "custom_category") {
+      return res.status(400).json({
+        success: false,
+        message: "This service request does not need custom category approval.",
+      });
+    }
+
+    if (request.customCategoryApprovalStatus === "approved") {
+      return res.status(200).json({
+        success: true,
+        message: "Custom category request was already approved.",
+        data: {
+          request: buildRequestSummary(request),
+        },
+      });
+    }
+
+    const category = await findOrCreateApprovedCategoryForRequest({
+      serviceRequest: request,
+      adminUserId: req.user?.id || null,
+    });
+
+    request.categoryId = category._id;
+    request.categorySlug = String(category.slug || request.categorySlug).trim().toLowerCase();
+    request.categoryName = String(category.name || request.categoryName).trim();
+    request.customCategoryApprovalStatus = "approved";
+    request.customCategoryReviewedAt = new Date();
+    request.customCategoryReviewedBy = req.user?.id || null;
+    request.customCategoryRejectionReason = "";
+    await request.save({ validateBeforeSave: false });
+
+    const clientProfile = request.clientId || null;
+    const notifiedProviders = await notifyNearbyProvidersForRequest({
+      request: request.toObject(),
+      clientProfile,
+    });
+
+    emitToUser(String(request.clientId?._id || request.clientId), "notification:new", {
+      id: createNotificationId(String(request._id)),
+      type: "success",
+      title: "Custom category approved",
+      description: `Your custom category request for ${request.categoryName || "this service"} was approved.`,
+      data: {
+        notificationType: "custom_category_request_approved",
+        requestId: String(request._id),
+        requestNumber: request.requestNumber,
+        categorySlug: request.categorySlug,
+        categoryName: request.categoryName,
+        targetPath: "/client/orders?tab=requested",
+      },
+      unread: true,
+      createdAt: new Date().toISOString(),
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Custom category request approved successfully.",
+      data: {
+        request: buildRequestSummary({
+          ...request.toObject(),
+          categoryId: category.toObject(),
+          clientId: clientProfile,
+        }),
+        notifiedProviders,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 module.exports = {
   createServiceRequest,
   listClientServiceRequests,
   listProviderServiceRequests,
+  listAdminServiceRequests,
+  approveServiceRequestCustomCategory,
   acceptServiceRequest,
   ignoreServiceRequest,
 };

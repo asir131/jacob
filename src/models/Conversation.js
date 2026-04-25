@@ -8,6 +8,12 @@ const conversationSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    gigId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Gig",
+      default: null,
+      index: true,
+    },
     participants: [
       {
         type: mongoose.Schema.Types.ObjectId,

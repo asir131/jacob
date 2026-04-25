@@ -29,6 +29,23 @@ const orderSchema = new mongoose.Schema(
       ref: "Conversation",
       default: null,
     },
+    repeatRootOrderId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Order",
+      default: null,
+      index: true,
+    },
+    repeatSourceOrderId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Order",
+      default: null,
+      index: true,
+    },
+    repeatIteration: {
+      type: Number,
+      default: 1,
+      min: 1,
+    },
     packageName: {
       type: String,
       required: true,
@@ -115,6 +132,10 @@ const orderSchema = new mongoose.Schema(
       default: null,
     },
     completedAt: {
+      type: Date,
+      default: null,
+    },
+    scheduledReminderSentAt: {
       type: Date,
       default: null,
     },

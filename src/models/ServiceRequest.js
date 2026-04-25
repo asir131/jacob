@@ -30,6 +30,46 @@ const serviceRequestSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    requestSource: {
+      type: String,
+      enum: ["existing_category", "custom_category"],
+      default: "existing_category",
+      index: true,
+    },
+    customCategoryName: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    customCategoryDescription: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    customCategoryApprovalStatus: {
+      type: String,
+      enum: ["not_requested", "pending", "approved", "rejected"],
+      default: "not_requested",
+      index: true,
+    },
+    customCategoryRequestedAt: {
+      type: Date,
+      default: null,
+    },
+    customCategoryReviewedAt: {
+      type: Date,
+      default: null,
+    },
+    customCategoryReviewedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    customCategoryRejectionReason: {
+      type: String,
+      default: "",
+      trim: true,
+    },
     serviceAddress: {
       type: String,
       required: true,
@@ -105,5 +145,6 @@ const serviceRequestSchema = new mongoose.Schema(
 
 serviceRequestSchema.index({ status: 1, createdAt: -1 });
 serviceRequestSchema.index({ categorySlug: 1, createdAt: -1 });
+serviceRequestSchema.index({ requestSource: 1, customCategoryApprovalStatus: 1, createdAt: -1 });
 
 module.exports = mongoose.model("ServiceRequest", serviceRequestSchema);

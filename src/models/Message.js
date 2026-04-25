@@ -55,6 +55,18 @@ const messageSchema = new mongoose.Schema(
         },
       },
     ],
+    messageType: {
+      type: String,
+      enum: ["text", "custom_order_proposal", "system"],
+      default: "text",
+      index: true,
+    },
+    customOrderProposalId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "CustomOrderProposal",
+      default: null,
+      index: true,
+    },
     readAt: {
       type: Date,
       default: null,
