@@ -6,7 +6,8 @@ const Message = require("../models/Message");
 const Order = require("../models/Order");
 const User = require("../models/User");
 const CustomOrderProposal = require("../models/CustomOrderProposal");
-const { emitToUser } = require("../socket");
+const ServiceRequest = require("../models/ServiceRequest");
+const { emitToUser, emitToRole } = require("../socket");
 
 const uploadBufferToCloudinary = (buffer, folder, resourceType = "auto") => {
   return new Promise((resolve, reject) => {
@@ -69,6 +70,7 @@ const buildCustomOrderProposalSummary = (proposal) => {
   return {
     id: proposal._id,
     conversationId: proposal.conversationId || null,
+    serviceRequestId: proposal.serviceRequestId || null,
     gigId: proposal.gigId?._id || proposal.gigId || null,
     clientId: proposal.clientId?._id || proposal.clientId || null,
     providerId: proposal.providerId?._id || proposal.providerId || null,
@@ -96,15 +98,18 @@ const normalizeConversation = (conversation, currentUserId) => {
   const otherUser = participants.find((user) => String(user?._id || user) !== String(currentUserId));
   const order = conversation.orderId || null;
   const gig = conversation.gigId || null;
+  const serviceRequest = conversation.serviceRequestId || null;
   return {
     id: conversation._id,
     orderId: order?._id || conversation.orderId || null,
     gigId: gig?._id || order?.gigId?._id || order?.gigId || conversation.gigId || null,
+    serviceRequestId: serviceRequest?._id || conversation.serviceRequestId || null,
     orderNumber: order?.orderNumber || "",
-    orderName: order?.gigId?.title || gig?.title || "",
+    orderName: order?.gigId?.title || gig?.title || serviceRequest?.categoryName || "",
     orderStatus: order?.status || "",
     packageTitle: order?.packageTitle || "",
-    categoryName: order?.categoryName || order?.gigId?.categoryName || gig?.categoryName || "",
+    categoryName:
+      order?.categoryName || order?.gigId?.categoryName || gig?.categoryName || serviceRequest?.categoryName || "",
     blockedBy: conversation.blockedBy || null,
     lastMessage: conversation.lastMessage || "",
     lastMessageAt: conversation.lastMessageAt || conversation.updatedAt || conversation.createdAt,
@@ -170,11 +175,12 @@ const ensureConversationForOrder = async ({ orderId, clientId, providerId }) => 
   return conversation;
 };
 
-const ensureConversationForParticipants = async ({ clientId, providerId }) => {
+const ensureConversationForParticipants = async ({ clientId, providerId, gigId = null, serviceRequestId = null }) => {
   if (!clientId || !providerId) return null;
 
   let conversation = await Conversation.findOne({
     orderId: null,
+    serviceRequestId: serviceRequestId || null,
     participants: { $all: [clientId, providerId] },
     $expr: { $eq: [{ $size: "$participants" }, 2] },
   });
@@ -182,7 +188,8 @@ const ensureConversationForParticipants = async ({ clientId, providerId }) => {
   if (!conversation) {
     conversation = await Conversation.create({
       orderId: null,
-      gigId: null,
+      gigId: gigId || null,
+      serviceRequestId: serviceRequestId || null,
       participants: [clientId, providerId],
       blockedBy: null,
       lastMessage: "",
@@ -197,12 +204,13 @@ const hydrateConversation = async (conversationId) =>
   Conversation.findById(conversationId)
     .populate("participants", "_id firstName lastName email avatar role")
     .populate("gigId", "_id title categoryName")
+    .populate("serviceRequestId", "_id requestNumber categoryName categorySlug serviceAddress")
     .populate({
       path: "orderId",
       select: "_id orderNumber gigId packageTitle categoryName status",
       populate: { path: "gigId", select: "title categoryName" },
     })
-    .select("_id participants gigId orderId blockedBy lastMessage lastMessageAt updatedAt createdAt")
+    .select("_id participants gigId serviceRequestId orderId blockedBy lastMessage lastMessageAt updatedAt createdAt")
     .lean();
 
 const persistConversationMessage = async ({
@@ -327,6 +335,34 @@ const ensureConversationByOrder = async (req, res, next) => {
   }
 };
 
+const startServiceRequestNegotiationConversation = async ({
+  serviceRequestId,
+  clientId,
+  providerId,
+  categoryName = "",
+  requestNumber = "",
+}) => {
+  if (!serviceRequestId || !clientId || !providerId) return null;
+
+  const conversation = await ensureConversationForParticipants({
+    clientId,
+    providerId,
+    serviceRequestId,
+  });
+
+  if (!conversation.serviceRequestId) {
+    conversation.serviceRequestId = serviceRequestId;
+  }
+
+  if (!conversation.lastMessage) {
+    conversation.lastMessage = `Accepted request ${requestNumber || categoryName || "service request"} for negotiation.`;
+    conversation.lastMessageAt = new Date();
+  }
+
+  await conversation.save({ validateBeforeSave: false });
+  return conversation;
+};
+
 const startCustomOrderConversation = async (req, res, next) => {
   try {
     if (!req.user?.id || !["client", "superAdmin"].includes(req.user.role)) {
@@ -357,6 +393,7 @@ const startCustomOrderConversation = async (req, res, next) => {
     const conversation = await ensureConversationForParticipants({
       clientId: req.user.id,
       providerId: provider._id,
+      gigId: gig._id,
     });
     if (!conversation.gigId) {
       conversation.gigId = gig._id;
@@ -528,7 +565,7 @@ const createCustomOrderProposal = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "Invalid conversation id." });
     }
 
-    const conversation = await Conversation.findById(conversationId).select("_id participants orderId blockedBy");
+    const conversation = await Conversation.findById(conversationId).select("_id participants orderId blockedBy serviceRequestId");
     if (!conversation) {
       return res.status(404).json({ success: false, message: "Conversation not found." });
     }
@@ -552,13 +589,20 @@ const createCustomOrderProposal = async (req, res, next) => {
     if (!receiverId) {
       return res.status(400).json({ success: false, message: "Client not found in conversation." });
     }
-    if (!mongoose.Types.ObjectId.isValid(String(gigId || ""))) {
-      return res.status(400).json({ success: false, message: "Valid service id is required." });
-    }
+    const hasGigId = mongoose.Types.ObjectId.isValid(String(gigId || ""));
+    const serviceRequest =
+      conversation.serviceRequestId && mongoose.Types.ObjectId.isValid(String(conversation.serviceRequestId))
+        ? await ServiceRequest.findById(conversation.serviceRequestId).select("_id categoryName categorySlug")
+        : null;
 
-    const gig = await Gig.findOne({ _id: gigId, providerId: req.user.id }).select("_id title categoryName");
-    if (!gig) {
-      return res.status(404).json({ success: false, message: "Service not found." });
+    let gig = null;
+    if (hasGigId) {
+      gig = await Gig.findOne({ _id: gigId, providerId: req.user.id }).select("_id title categoryName");
+      if (!gig) {
+        return res.status(404).json({ success: false, message: "Service not found." });
+      }
+    } else if (!serviceRequest) {
+      return res.status(400).json({ success: false, message: "Valid service id is required." });
     }
 
     let sourceOrder = null;
@@ -580,7 +624,7 @@ const createCustomOrderProposal = async (req, res, next) => {
         return res.status(404).json({ success: false, message: "Completed source order not found." });
       }
 
-      if (String(sourceOrder.gigId || "") !== String(gig._id)) {
+      if (gig && String(sourceOrder.gigId || "") !== String(gig._id)) {
         return res.status(400).json({ success: false, message: "Repeat order must use the same service as the original order." });
       }
 
@@ -601,7 +645,8 @@ const createCustomOrderProposal = async (req, res, next) => {
 
     const proposal = await CustomOrderProposal.create({
       conversationId: conversation._id,
-      gigId: gig._id,
+      serviceRequestId: serviceRequest?._id || null,
+      gigId: gig?._id || null,
       clientId: receiverId,
       providerId: req.user.id,
       proposalType: isRepeatOrderProposal ? "repeat_order" : "custom",
@@ -649,8 +694,8 @@ const createCustomOrderProposal = async (req, res, next) => {
       type: "system",
       title: isRepeatOrderProposal ? "New repeat order offer" : "New custom order request",
       description: isRepeatOrderProposal
-        ? `${req.user.firstName || "A provider"} sent you a repeat order offer for ${gig.title || "a service"}.`
-        : `${req.user.firstName || "A provider"} sent you a custom order request for ${gig.title || "a service"}.`,
+        ? `${req.user.firstName || "A provider"} sent you a repeat order offer for ${gig?.title || serviceRequest?.categoryName || "a service"}.`
+        : `${req.user.firstName || "A provider"} sent you a custom order request for ${gig?.title || serviceRequest?.categoryName || "a service"}.`,
       unread: true,
       createdAt: new Date().toISOString(),
       data: {
@@ -662,6 +707,24 @@ const createCustomOrderProposal = async (req, res, next) => {
         targetPath,
       },
     });
+    if (serviceRequest) {
+      emitToRole("superAdmin", "notification:new", {
+        id: `NTF-${Date.now()}-admin`,
+        type: "system",
+        title: "Provider sent a custom offer",
+        description: `${req.user.firstName || "A provider"} sent a custom order proposal for ${serviceRequest.requestNumber || serviceRequest.categoryName || "a service request"}.`,
+        unread: true,
+        createdAt: new Date().toISOString(),
+        data: {
+          notificationType: "admin_custom_order_proposal_created",
+          conversationId: conversationIdStr,
+          proposalId: String(proposal._id),
+          requestId: String(serviceRequest._id),
+          requestNumber: serviceRequest.requestNumber || "",
+          targetPath: `/service-requests?requestId=${String(serviceRequest._id)}`,
+        },
+      });
+    }
 
     return res.status(201).json({
       success: true,
@@ -699,13 +762,19 @@ const respondToCustomOrderProposal = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "This custom order request is already handled." });
     }
 
-    const conversation = await Conversation.findById(proposal.conversationId).select("_id participants orderId");
+    const conversation = await Conversation.findById(proposal.conversationId).select("_id participants orderId serviceRequestId");
     if (!conversation) {
       return res.status(404).json({ success: false, message: "Conversation not found." });
     }
 
     const provider = await User.findById(proposal.providerId).select("_id firstName lastName");
-    const gig = await Gig.findById(proposal.gigId).select("_id title categoryName");
+    const gig = proposal.gigId ? await Gig.findById(proposal.gigId).select("_id title categoryName") : null;
+    const serviceRequest =
+      proposal.serviceRequestId || conversation?.serviceRequestId
+        ? await ServiceRequest.findById(proposal.serviceRequestId || conversation?.serviceRequestId).select(
+            "_id categoryName categorySlug requestNumber serviceAddress"
+          )
+        : null;
     const sourceOrder = proposal.sourceOrderId
       ? await Order.findById(proposal.sourceOrderId).select("_id repeatRootOrderId repeatIteration packageTitle categoryName")
       : null;
@@ -725,7 +794,7 @@ const respondToCustomOrderProposal = async (req, res, next) => {
 
       createdOrder = await Order.create({
         orderNumber: createOrderNumber(),
-        gigId: proposal.gigId,
+        gigId: proposal.gigId || null,
         clientId: proposal.clientId,
         providerId: proposal.providerId,
         conversationId: conversation._id,
@@ -734,7 +803,7 @@ const respondToCustomOrderProposal = async (req, res, next) => {
         repeatIteration,
         packageName: isRepeatOrderProposal ? "repeat_order" : "custom_order",
         packageTitle: proposal.title,
-        categoryName: gig?.categoryName || "Custom Order",
+        categoryName: gig?.categoryName || serviceRequest?.categoryName || "Custom Order",
         packagePrice: Number(proposal.price) || 0,
         scheduledDate: proposal.scheduledDate,
         scheduledTime: proposal.scheduledTime,
@@ -754,6 +823,16 @@ const respondToCustomOrderProposal = async (req, res, next) => {
       if (!conversation.orderId) {
         conversation.orderId = createdOrder._id;
         await conversation.save({ validateBeforeSave: false });
+      }
+
+      if (serviceRequest) {
+        serviceRequest.linkedOrderId = createdOrder._id;
+        serviceRequest.linkedOrderNumber = createdOrder.orderNumber;
+        serviceRequest.status = "accepted";
+        serviceRequest.acceptedProviderId = proposal.providerId;
+        serviceRequest.acceptedAt = serviceRequest.acceptedAt || new Date();
+        serviceRequest.acceptedVia = "admin_invitation";
+        await serviceRequest.save({ validateBeforeSave: false });
       }
 
       proposal.createdOrderId = createdOrder._id;
@@ -837,6 +916,25 @@ const respondToCustomOrderProposal = async (req, res, next) => {
           orderId: createdOrder._id.toString(),
           sourceOrderId: proposal.sourceOrderId?.toString() || "",
           targetPath: `/client/orders/${createdOrder.orderNumber || createdOrder._id.toString()}`,
+        },
+      });
+    }
+    if (serviceRequest) {
+      emitToRole("superAdmin", "notification:new", {
+        id: `NTF-${Date.now()}-admin-proposal-response`,
+        type: action === "accept" ? "success" : "warning",
+        title: action === "accept" ? "Client accepted custom offer" : "Client declined custom offer",
+        description: `${req.user.firstName || "Client"} ${action}ed the proposal for ${serviceRequest.requestNumber || serviceRequest.categoryName || proposal.title}.`,
+        unread: true,
+        createdAt: new Date().toISOString(),
+        data: {
+          notificationType: action === "accept" ? "admin_custom_order_proposal_accepted" : "admin_custom_order_proposal_declined",
+          conversationId: conversationIdStr,
+          proposalId: String(proposal._id),
+          requestId: String(serviceRequest._id),
+          requestNumber: serviceRequest.requestNumber || "",
+          orderId: createdOrder?._id?.toString() || "",
+          targetPath: `/service-requests?requestId=${String(serviceRequest._id)}`,
         },
       });
     }
@@ -1287,6 +1385,7 @@ const markAllProviderMessagesAsRead = async (req, res, next) => {
 module.exports = {
   ensureConversationForOrder,
   ensureConversationForParticipants,
+  startServiceRequestNegotiationConversation,
   getConversations,
   ensureConversationByOrder,
   startCustomOrderConversation,

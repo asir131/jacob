@@ -8,10 +8,16 @@ const customOrderProposalSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    serviceRequestId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "ServiceRequest",
+      default: null,
+      index: true,
+    },
     gigId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Gig",
-      required: true,
+      default: null,
       index: true,
     },
     clientId: {

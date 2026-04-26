@@ -14,6 +14,12 @@ const conversationSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    serviceRequestId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "ServiceRequest",
+      default: null,
+      index: true,
+    },
     participants: [
       {
         type: mongoose.Schema.Types.ObjectId,

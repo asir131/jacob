@@ -4,6 +4,8 @@ const requireAuth = require("../middlewares/requireAuth");
 const requireAdmin = require("../middlewares/requireAdmin");
 const {
   createOrder,
+  getAdminDashboard,
+  getAdminOrderDetail,
   getProviderDashboard,
   getClientDashboard,
   listProviderOrders,
@@ -31,6 +33,8 @@ const upload = multer({
 });
 
 router.post("/", requireAuth, createOrder);
+router.get("/admin/dashboard", requireAuth, requireAdmin, getAdminDashboard);
+router.get("/admin/orders/:id", requireAuth, requireAdmin, getAdminOrderDetail);
 router.get("/admin/transactions", requireAuth, requireAdmin, getAdminTransactions);
 router.get("/provider/dashboard", requireAuth, getProviderDashboard);
 router.get("/provider", requireAuth, listProviderOrders);

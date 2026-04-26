@@ -131,6 +131,45 @@ const serviceRequestSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    acceptedVia: {
+      type: String,
+      enum: ["direct", "admin_invitation", ""],
+      default: "",
+      trim: true,
+    },
+    negotiationConversationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Conversation",
+      default: null,
+    },
+    adminInvitations: [
+      {
+        providerId: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          required: true,
+        },
+        invitedBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          default: null,
+        },
+        invitedAt: {
+          type: Date,
+          default: Date.now,
+        },
+        status: {
+          type: String,
+          enum: ["pending", "accepted", "declined", "expired", "unavailable"],
+          default: "pending",
+          index: true,
+        },
+        respondedAt: {
+          type: Date,
+          default: null,
+        },
+      },
+    ],
     ignoredByProviderIds: [
       {
         type: mongoose.Schema.Types.ObjectId,

@@ -8,6 +8,8 @@ const {
   listProviderServiceRequests,
   listAdminServiceRequests,
   approveServiceRequestCustomCategory,
+  inviteProvidersToServiceRequest,
+  respondToAdminServiceRequestInvitation,
   acceptServiceRequest,
   ignoreServiceRequest,
 } = require("../controllers/serviceRequestController");
@@ -21,8 +23,10 @@ const upload = multer({
 router.post("/", requireAuth, upload.array("images", 4), createServiceRequest);
 router.get("/admin", requireAuth, requireAdmin, listAdminServiceRequests);
 router.patch("/admin/:id/custom-category/approve", requireAuth, requireAdmin, approveServiceRequestCustomCategory);
+router.post("/admin/invite-providers", requireAuth, requireAdmin, inviteProvidersToServiceRequest);
 router.get("/client", requireAuth, listClientServiceRequests);
 router.get("/provider", requireAuth, listProviderServiceRequests);
+router.patch("/provider/:id/admin-invitation/respond", requireAuth, respondToAdminServiceRequestInvitation);
 router.patch("/provider/:id/accept", requireAuth, acceptServiceRequest);
 router.patch("/provider/:id/ignore", requireAuth, ignoreServiceRequest);
 

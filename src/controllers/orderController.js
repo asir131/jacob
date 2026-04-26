@@ -6,6 +6,7 @@ const Order = require("../models/Order");
 const User = require("../models/User");
 const Message = require("../models/Message");
 const Conversation = require("../models/Conversation");
+const ServiceRequest = require("../models/ServiceRequest");
 const { emitToUser } = require("../socket");
 const { ensureConversationForOrder } = require("./chatController");
 const WithdrawalRequest = require("../models/WithdrawalRequest");
@@ -333,6 +334,292 @@ const buildDashboardRequestCard = (order) => {
     clientId: summary.client?.id || "",
     status: summary.status,
   };
+};
+
+const formatShortDay = (date) =>
+  new Intl.DateTimeFormat("en-US", { weekday: "short" }).format(date);
+
+const formatShortMonth = (date) =>
+  new Intl.DateTimeFormat("en-US", { month: "short" }).format(date).toUpperCase();
+
+const createDateKey = (date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const buildAdminOrderPreview = (order) => {
+  const summary = buildOrderSummary(order);
+  if (!summary) return null;
+
+  return {
+    id: String(summary.id || ""),
+    orderNumber: summary.orderNumber || "",
+    orderName: summary.orderName || "Service order",
+    categoryName: summary.categoryName || "",
+    status: summary.status || "",
+    paymentStatus: summary.paymentStatus || "",
+    paymentAmount: roundMoney(summary.paymentAmount || 0),
+    platformFeeAmount: roundMoney(summary.platformFeeAmount || 0),
+    providerEarningsAmount: roundMoney(summary.providerEarningsAmount || 0),
+    scheduledDate: summary.scheduledDate || null,
+    scheduledTime: summary.scheduledTime || "",
+    serviceAddress: summary.serviceAddress || "",
+    createdAt: summary.createdAt || null,
+    completedAt: summary.completedAt || null,
+    paidAt: summary.paidAt || null,
+    client: summary.client,
+    provider: summary.provider,
+    gig: summary.gig,
+  };
+};
+
+const getAdminDashboard = async (req, res, next) => {
+  try {
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now);
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const sevenDaysAgo = new Date(now);
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
+    sevenDaysAgo.setHours(0, 0, 0, 0);
+
+    const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const monthlyRevenueStart = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+
+    const [
+      orderCounts,
+      verifiedProviders,
+      newUsersLast30Days,
+      totalUsers,
+      recentOrdersRaw,
+      paidOrdersForRevenue,
+      recentMessages,
+      recentServiceRequests,
+      recentOrderActivity,
+    ] = await Promise.all([
+      Order.aggregate([
+        {
+          $group: {
+            _id: null,
+            totalBookings: { $sum: 1 },
+            completedOrders: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "completed"] }, 1, 0],
+              },
+            },
+            weeklyOrders: {
+              $sum: {
+                $cond: [{ $gte: ["$createdAt", sevenDaysAgo] }, 1, 0],
+              },
+            },
+            totalRevenue: {
+              $sum: {
+                $cond: [
+                  { $eq: ["$paymentStatus", "paid"] },
+                  { $ifNull: ["$paymentAmount", 0] },
+                  0,
+                ],
+              },
+            },
+          },
+        },
+      ]),
+      User.countDocuments({ role: "provider", payoutVerificationStatus: "verified" }),
+      User.countDocuments({ createdAt: { $gte: thirtyDaysAgo } }),
+      User.countDocuments(),
+      Order.find({})
+        .populate("gigId", "_id title categoryName images")
+        .populate("clientId", "_id firstName lastName email phone address avatar locationLat locationLng")
+        .populate("providerId", "_id firstName lastName email phone address avatar averageRating reviewCount sellerLevel")
+        .sort({ createdAt: -1 })
+        .limit(30)
+        .lean(),
+      Order.find({
+        paymentStatus: "paid",
+        $or: [{ paidAt: { $gte: monthlyRevenueStart } }, { createdAt: { $gte: monthlyRevenueStart } }],
+      })
+        .select("paymentAmount paidAt createdAt")
+        .lean(),
+      Message.find({ createdAt: { $gte: sevenDaysAgo } }).select("createdAt senderId receiverId").lean(),
+      ServiceRequest.find({ createdAt: { $gte: sevenDaysAgo } }).select("createdAt clientId acceptedProviderId").lean(),
+      Order.find({ createdAt: { $gte: sevenDaysAgo } }).select("createdAt clientId providerId").lean(),
+    ]);
+
+    const counts = orderCounts[0] || {};
+    const monthlyRevenueMap = new Map();
+    const pieRevenueMap = new Map();
+    const weeklyRevenueMap = new Map();
+    const dailyActiveUsersMap = new Map();
+
+    for (let index = 0; index < 12; index += 1) {
+      const monthDate = new Date(now.getFullYear(), now.getMonth() - (11 - index), 1);
+      const monthKey = `${monthDate.getFullYear()}-${monthDate.getMonth()}`;
+      monthlyRevenueMap.set(monthKey, {
+        name: formatShortMonth(monthDate),
+        revenue: 0,
+      });
+    }
+
+    for (let index = 0; index < 7; index += 1) {
+      const dayDate = new Date(sevenDaysAgo);
+      dayDate.setDate(sevenDaysAgo.getDate() + index);
+      const dayKey = createDateKey(dayDate);
+      weeklyRevenueMap.set(dayKey, {
+        name: formatShortDay(dayDate),
+        revenue: 0,
+      });
+      dailyActiveUsersMap.set(dayKey, {
+        name: formatShortDay(dayDate),
+        users: new Set(),
+      });
+    }
+
+    paidOrdersForRevenue.forEach((order) => {
+      const sourceDate = new Date(order.paidAt || order.createdAt || now);
+      const amount = roundMoney(order.paymentAmount || 0);
+      const monthKey = `${sourceDate.getFullYear()}-${sourceDate.getMonth()}`;
+      const monthEntry = monthlyRevenueMap.get(monthKey);
+      if (monthEntry) {
+        monthEntry.revenue = roundMoney(monthEntry.revenue + amount);
+        monthlyRevenueMap.set(monthKey, monthEntry);
+      }
+
+      const dayKey = createDateKey(sourceDate);
+      const dayEntry = weeklyRevenueMap.get(dayKey);
+      if (dayEntry) {
+        dayEntry.revenue = roundMoney(dayEntry.revenue + amount);
+        weeklyRevenueMap.set(dayKey, dayEntry);
+      }
+    });
+
+    const registerActiveUser = (dateValue, userId) => {
+      if (!userId) return;
+      const date = new Date(dateValue || now);
+      const dayKey = createDateKey(date);
+      const entry = dailyActiveUsersMap.get(dayKey);
+      if (!entry) return;
+      entry.users.add(String(userId));
+      dailyActiveUsersMap.set(dayKey, entry);
+    };
+
+    recentMessages.forEach((message) => {
+      registerActiveUser(message.createdAt, message.senderId);
+      registerActiveUser(message.createdAt, message.receiverId);
+    });
+
+    recentServiceRequests.forEach((request) => {
+      registerActiveUser(request.createdAt, request.clientId);
+      registerActiveUser(request.createdAt, request.acceptedProviderId);
+    });
+
+    recentOrderActivity.forEach((order) => {
+      registerActiveUser(order.createdAt, order.clientId);
+      registerActiveUser(order.createdAt, order.providerId);
+    });
+
+    const monthlyRevenue = Array.from(monthlyRevenueMap.values());
+    const weeklyRevenue = Array.from(weeklyRevenueMap.values());
+    const dailyTraffic = Array.from(dailyActiveUsersMap.values()).map((entry) => ({
+      name: entry.name,
+      users: entry.users.size,
+    }));
+    const maxActiveUsers = dailyTraffic.reduce((max, item) => Math.max(max, item.users), 0);
+    const pieRevenue = monthlyRevenue
+      .filter((item) => item.revenue > 0)
+      .slice(-6)
+      .map((item) => {
+        pieRevenueMap.set(item.name, item.revenue);
+        return { name: item.name, value: item.revenue };
+      });
+
+    const recentOrdersWithRepeatCounts = await attachRepeatCounts(recentOrdersRaw);
+    const recentOrders = recentOrdersWithRepeatCounts
+      .map(buildAdminOrderPreview)
+      .filter(Boolean);
+
+    return res.status(200).json({
+      success: true,
+      message: "Admin dashboard fetched successfully.",
+      data: {
+        summary: {
+          totalRevenue: roundMoney(counts.totalRevenue || 0),
+          totalBookings: Number(counts.totalBookings || 0),
+          verifiedProviders: Number(verifiedProviders || 0),
+          weeklyOrders: Number(counts.weeklyOrders || 0),
+          newUsersLast30Days: Number(newUsersLast30Days || 0),
+          completedOrders: Number(counts.completedOrders || 0),
+          totalUsers: Number(totalUsers || 0),
+          currentMonthRevenue: roundMoney(
+            paidOrdersForRevenue.reduce((sum, order) => {
+              const sourceDate = new Date(order.paidAt || order.createdAt || now);
+              if (sourceDate < currentMonthStart) return sum;
+              return sum + (Number(order.paymentAmount) || 0);
+            }, 0)
+          ),
+          maxActiveUsers,
+        },
+        charts: {
+          monthlyRevenue,
+          weeklyRevenue,
+          dailyTraffic,
+          pieRevenue,
+        },
+        recentOrders,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const getAdminOrderDetail = async (req, res, next) => {
+  try {
+    const rawId = String(req.params.id || "").trim();
+    const query = rawId.startsWith("ORD-") ? { orderNumber: rawId } : { _id: rawId };
+
+    const order = await Order.findOne(query)
+      .populate("gigId", "_id title categoryName images")
+      .populate("clientId", "_id firstName lastName email phone address avatar locationLat locationLng")
+      .populate("providerId", "_id firstName lastName email phone address avatar averageRating reviewCount sellerLevel walletBalance totalEarnings")
+      .lean();
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found.",
+      });
+    }
+
+    const providerId = order?.providerId?._id || order?.providerId;
+    let completedOrders = 0;
+    if (providerId) {
+      completedOrders = await Order.countDocuments({
+        providerId,
+        status: "completed",
+      });
+    }
+
+    const [orderWithRepeatCount] = await attachRepeatCounts([
+      {
+        ...order,
+        providerId: {
+          ...(order.providerId || {}),
+          completedOrders,
+        },
+      },
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      message: "Admin order detail fetched successfully.",
+      data: {
+        order: buildOrderSummary(orderWithRepeatCount),
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
 };
 
 const resolveSellerLevel = (completedOrderCount = 0) => {
@@ -2306,6 +2593,8 @@ const finalizeClientOrder = async (req, res, next) => {
 
 module.exports = {
   createOrder,
+  getAdminDashboard,
+  getAdminOrderDetail,
   listProviderOrders,
   getProviderDashboard,
   getClientDashboard,

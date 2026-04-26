@@ -5,6 +5,7 @@ const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
 
 let ioInstance = null;
+const connectedUserCounts = new Map();
 
 const resolveToken = (socket) => {
   const authToken = socket.handshake.auth?.token;
@@ -40,11 +41,13 @@ const initSocket = (httpServer) => {
   });
 
   ioInstance.on("connection", (socket) => {
-    const room = `user:${socket.data.userId}`;
+    const userId = String(socket.data.userId || "");
+    const room = `user:${userId}`;
     socket.join(room);
     if (socket.data.role) {
       socket.join(`role:${socket.data.role}`);
     }
+    connectedUserCounts.set(userId, (connectedUserCounts.get(userId) || 0) + 1);
 
     const relayCallEvent = (eventName, targetUserId, payload = {}) => {
       if (!targetUserId) return;
@@ -140,6 +143,15 @@ const initSocket = (httpServer) => {
       userId: socket.data.userId,
       connectedAt: new Date().toISOString(),
     });
+
+    socket.on("disconnect", () => {
+      const nextCount = (connectedUserCounts.get(userId) || 1) - 1;
+      if (nextCount > 0) {
+        connectedUserCounts.set(userId, nextCount);
+      } else {
+        connectedUserCounts.delete(userId);
+      }
+    });
   });
 
   return ioInstance;
@@ -162,9 +174,12 @@ const emitToRole = (role, eventName, payload) => {
   ioInstance.to(`role:${role}`).emit(eventName, payload);
 };
 
+const isUserOnline = (userId) => connectedUserCounts.has(String(userId || ""));
+
 module.exports = {
   initSocket,
   getIO,
   emitToUser,
   emitToRole,
+  isUserOnline,
 };

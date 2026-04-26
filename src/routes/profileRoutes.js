@@ -5,6 +5,10 @@ const requireAdmin = require("../middlewares/requireAdmin");
 const {
   getMyProfile,
   getPublicProviderProfile,
+  listAdminCustomers,
+  getAdminCustomerDetails,
+  listAdminProviders,
+  getAdminProviderDetails,
   uploadAvatar,
   updateProfile,
   changePassword,
@@ -32,6 +36,10 @@ router.get("/me/saved-services", requireAuth, getMySavedServices);
 router.post("/me/saved-services/:gigId", requireAuth, saveService);
 router.delete("/me/saved-services/:gigId", requireAuth, removeSavedService);
 router.get("/provider/:providerId/public", getPublicProviderProfile);
+router.get("/admin/customers", requireAuth, requireAdmin, listAdminCustomers);
+router.get("/admin/customers/:customerId", requireAuth, requireAdmin, getAdminCustomerDetails);
+router.get("/admin/providers", requireAuth, requireAdmin, listAdminProviders);
+router.get("/admin/providers/:providerId", requireAuth, requireAdmin, getAdminProviderDetails);
 router.post("/avatar", requireAuth, upload.single("image"), uploadAvatar);
 router.put("/me", requireAuth, updateProfile);
 router.post("/change-password", requireAuth, changePassword);

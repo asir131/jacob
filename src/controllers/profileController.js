@@ -4,7 +4,7 @@ const Gig = require("../models/Gig");
 const Order = require("../models/Order");
 const cloudinary = require("../config/cloudinary");
 const bcrypt = require("bcryptjs");
-const { emitToRole, emitToUser } = require("../socket");
+const { emitToRole, emitToUser, isUserOnline } = require("../socket");
 
 const PAYOUT_STATUS = {
   UNVERIFIED: "unverified",
@@ -100,6 +100,31 @@ const getPublicProviderLocation = (providerDoc = {}) => {
 
   const lat = typeof providerDoc?.serviceLocationLat === "number" ? providerDoc.serviceLocationLat : null;
   const lng = typeof providerDoc?.serviceLocationLng === "number" ? providerDoc.serviceLocationLng : null;
+  if (lat !== null && lng !== null) {
+    return `Lat ${lat.toFixed(4)}, Lng ${lng.toFixed(4)}`;
+  }
+
+  return "Location unavailable";
+};
+
+const mapAdminPresenceStatus = (userId) => (isUserOnline(userId) ? "active" : "inactive");
+
+const mapProviderVerificationStatus = (userDoc = {}) => {
+  const verificationStatus = String(userDoc?.payoutVerificationStatus || "").toLowerCase();
+  if (verificationStatus === PAYOUT_STATUS.VERIFIED) return "verified";
+  if (verificationStatus === PAYOUT_STATUS.REJECTED) return "disable";
+  return "pending";
+};
+
+const formatAdminLocation = (userDoc = {}) => {
+  const address = String(userDoc?.address || "").trim();
+  if (address) return address;
+
+  const serviceCity = String(userDoc?.serviceCity || "").trim();
+  if (serviceCity) return serviceCity;
+
+  const lat = typeof userDoc?.locationLat === "number" ? userDoc.locationLat : null;
+  const lng = typeof userDoc?.locationLng === "number" ? userDoc.locationLng : null;
   if (lat !== null && lng !== null) {
     return `Lat ${lat.toFixed(4)}, Lng ${lng.toFixed(4)}`;
   }
@@ -264,6 +289,345 @@ const getPublicProviderProfile = async (req, res, next) => {
         performance: {
           responseRate,
           deliveredOnTime: deliveredOnTimeRate,
+          orderCompletion: completionRate,
+        },
+        skills: [...new Set(gigs.map((gig) => gig.categoryName).filter(Boolean))],
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const listAdminCustomers = async (req, res, next) => {
+  try {
+    const customers = await User.find({ role: "client" })
+      .select("_id firstName lastName email avatar address phone locationLat locationLng createdAt")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const customerIds = customers.map((item) => item._id);
+    const orderStats = await Order.aggregate([
+      {
+        $match: {
+          clientId: { $in: customerIds },
+        },
+      },
+      {
+        $group: {
+          _id: "$clientId",
+          totalOrders: { $sum: 1 },
+          totalSpent: {
+            $sum: {
+              $cond: [{ $eq: ["$paymentStatus", "paid"] }, { $ifNull: ["$paymentAmount", 0] }, 0],
+            },
+          },
+        },
+      },
+    ]);
+
+    const orderStatsMap = new Map(orderStats.map((item) => [String(item._id), item]));
+    const data = customers.map((customer) => {
+      const stats = orderStatsMap.get(String(customer._id));
+      return {
+        id: String(customer._id),
+        name: `${customer.firstName || ""} ${customer.lastName || ""}`.trim() || customer.email || "Customer",
+        firstName: customer.firstName || "",
+        lastName: customer.lastName || "",
+        email: customer.email || "",
+        avatar: customer.avatar || "",
+        phone: customer.phone || "",
+        location: formatAdminLocation(customer),
+        totalSpent: roundMoney(stats?.totalSpent || 0),
+        totalOrders: Number(stats?.totalOrders || 0),
+        status: mapAdminPresenceStatus(customer._id),
+        joinedAt: customer.createdAt || null,
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Admin customers fetched successfully.",
+      data,
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const getAdminCustomerDetails = async (req, res, next) => {
+  try {
+    const { customerId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(customerId)) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found.",
+      });
+    }
+
+    const customer = await User.findOne({ _id: customerId, role: "client" })
+      .select("_id firstName lastName email avatar address phone locationLat locationLng preferredLanguage savedServiceIds createdAt")
+      .lean();
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found.",
+      });
+    }
+
+    const orders = await Order.find({ clientId: customerId })
+      .populate("providerId", "_id firstName lastName avatar email")
+      .populate("gigId", "_id title categoryName")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const totalSpent = roundMoney(
+      orders.reduce((sum, order) => {
+        if (String(order.paymentStatus || "") !== "paid") return sum;
+        return sum + (Number(order.paymentAmount) || 0);
+      }, 0)
+    );
+
+    const formattedOrders = orders.map((order) => ({
+      id: String(order._id),
+      orderNumber: order.orderNumber || "",
+      service: order.packageTitle || order.gigId?.title || order.categoryName || "Service order",
+      categoryName: order.categoryName || order.gigId?.categoryName || "",
+      provider: {
+        id: order.providerId?._id ? String(order.providerId._id) : "",
+        name:
+          `${order.providerId?.firstName || ""} ${order.providerId?.lastName || ""}`.trim() ||
+          order.providerId?.email ||
+          "Provider",
+        avatar: order.providerId?.avatar || "",
+        email: order.providerId?.email || "",
+      },
+      amount: roundMoney(order.paymentAmount || 0),
+      paymentStatus: order.paymentStatus || "",
+      status: order.status || "",
+      serviceAddress: order.serviceAddress || "",
+      scheduledDate: order.scheduledDate || null,
+      scheduledTime: order.scheduledTime || "",
+      createdAt: order.createdAt || null,
+    }));
+
+    return res.status(200).json({
+      success: true,
+      message: "Admin customer details fetched successfully.",
+      data: {
+        customer: {
+          id: String(customer._id),
+          name: `${customer.firstName || ""} ${customer.lastName || ""}`.trim() || customer.email || "Customer",
+          firstName: customer.firstName || "",
+          lastName: customer.lastName || "",
+          email: customer.email || "",
+          avatar: customer.avatar || "",
+          phone: customer.phone || "",
+          location: formatAdminLocation(customer),
+          address: customer.address || "",
+          preferredLanguage: customer.preferredLanguage || "English (US)",
+          savedServicesCount: Array.isArray(customer.savedServiceIds) ? customer.savedServiceIds.length : 0,
+          totalOrders: formattedOrders.length,
+          totalSpent,
+          status: mapAdminPresenceStatus(customer._id),
+          joinedAt: customer.createdAt || null,
+          locationLat: typeof customer.locationLat === "number" ? customer.locationLat : null,
+          locationLng: typeof customer.locationLng === "number" ? customer.locationLng : null,
+        },
+        orders: formattedOrders,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const listAdminProviders = async (req, res, next) => {
+  try {
+    const providers = await User.find({ role: "provider" })
+      .select(
+        "_id firstName lastName email avatar address phone serviceCity locationLat locationLng serviceLocationLat serviceLocationLng averageRating payoutVerificationStatus createdAt"
+      )
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const providerIds = providers.map((item) => item._id);
+    const gigs = await Gig.find({ providerId: { $in: providerIds } })
+      .select("providerId categoryName categorySlug status")
+      .lean();
+
+    const categoriesByProviderId = new Map();
+    gigs.forEach((gig) => {
+      const key = String(gig.providerId);
+      const next = categoriesByProviderId.get(key) || new Set();
+      if (gig.categoryName) {
+        next.add(String(gig.categoryName));
+      } else if (gig.categorySlug) {
+        next.add(String(gig.categorySlug));
+      }
+      categoriesByProviderId.set(key, next);
+    });
+
+    const data = providers.map((provider) => ({
+      id: String(provider._id),
+      name: `${provider.firstName || ""} ${provider.lastName || ""}`.trim() || provider.email || "Provider",
+      firstName: provider.firstName || "",
+      lastName: provider.lastName || "",
+      email: provider.email || "",
+      avatar: provider.avatar || "",
+      phone: provider.phone || "",
+      location: formatAdminLocation(provider),
+      categories: Array.from(categoriesByProviderId.get(String(provider._id)) || []),
+      status: mapProviderVerificationStatus(provider),
+      rating: Number(provider.averageRating) || 0,
+      joinedAt: provider.createdAt || null,
+      onlineStatus: mapAdminPresenceStatus(provider._id),
+    }));
+
+    return res.status(200).json({
+      success: true,
+      message: "Admin providers fetched successfully.",
+      data,
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const getAdminProviderDetails = async (req, res, next) => {
+  try {
+    const { providerId } = req.params;
+
+    req.params.providerId = providerId;
+
+    const provider = await User.findOne({ _id: providerId, role: "provider" })
+      .select(
+        "_id firstName lastName email avatar phone address businessBio experienceLevel serviceCity serviceLocationLat serviceLocationLng locationLat locationLng averageRating reviewCount sellerLevel createdAt payoutVerificationStatus totalEarnings totalWithdrawn walletBalance"
+      )
+      .lean();
+
+    if (!provider) {
+      return res.status(404).json({
+        success: false,
+        message: "Provider not found.",
+      });
+    }
+
+    const [gigDocs, reviewDocs, orderStats] = await Promise.all([
+      Gig.find({ providerId })
+        .sort({ publishedAt: -1, createdAt: -1 })
+        .lean(),
+      Order.find({
+        providerId,
+        status: "completed",
+        paymentStatus: "paid",
+        clientRating: { $ne: null },
+      })
+        .populate("clientId", "_id firstName lastName avatar")
+        .populate("gigId", "_id title categoryName")
+        .sort({ completedAt: -1, updatedAt: -1, createdAt: -1 })
+        .lean(),
+      Order.find({ providerId }).select("_id status scheduledDate completedAt createdAt").lean(),
+    ]);
+
+    const gigs = gigDocs.map((gig) => {
+      const packages = Array.isArray(gig.packages) ? gig.packages : [];
+      const validPrices = packages
+        .map((item) => Number(item?.price) || 0)
+        .filter((price) => price > 0);
+      return {
+        id: String(gig._id),
+        title: gig.title || "",
+        categoryName: gig.categoryName || "",
+        categorySlug: gig.categorySlug || "",
+        status: gig.status || "",
+        images: Array.isArray(gig.images) ? gig.images : [],
+        startingPrice: validPrices.length ? Number(Math.min(...validPrices).toFixed(2)) : 0,
+        avgPackagePrice: validPrices.length
+          ? Number((validPrices.reduce((sum, price) => sum + price, 0) / validPrices.length).toFixed(2))
+          : 0,
+      };
+    });
+
+    const reviews = reviewDocs.map((order) => ({
+      id: String(order._id),
+      gigName: order.gigId?.title || order.gigId?.categoryName || "Service order",
+      rating: Number(order.clientRating) || 0,
+      review: order.clientReview || "",
+      createdAt: order.completedAt || order.updatedAt || order.createdAt || null,
+      client: {
+        id: order.clientId?._id ? String(order.clientId._id) : "",
+        name: `${order.clientId?.firstName || ""} ${order.clientId?.lastName || ""}`.trim() || "Client",
+        avatar: order.clientId?.avatar || "",
+      },
+    }));
+
+    const totalOrders = orderStats.length;
+    const completedOrders = orderStats.filter((order) => String(order.status || "") === "completed" && order.completedAt).length;
+    const respondedOrders = orderStats.filter((order) =>
+      [
+        "accepted",
+        "accepting_delivery",
+        "revision_requested",
+        "under_revision",
+        "after_sell_revision_requested",
+        "under_after_sell_revision",
+        "done_after_sell_revision",
+        "completed",
+        "declined",
+      ].includes(String(order.status || ""))
+    ).length;
+    const onTimeCompletedOrders = orderStats.filter((order) => {
+      if (String(order.status || "") !== "completed" || !order.completedAt || !order.scheduledDate) return false;
+      const completedAt = new Date(order.completedAt).getTime();
+      const scheduledDate = new Date(order.scheduledDate).getTime();
+      return Number.isFinite(completedAt) && Number.isFinite(scheduledDate) && completedAt <= scheduledDate;
+    }).length;
+
+    const completionRate = totalOrders > 0 ? Number(((completedOrders / totalOrders) * 100).toFixed(1)) : 0;
+    const responseRate = totalOrders > 0 ? Number(((respondedOrders / totalOrders) * 100).toFixed(1)) : 0;
+    const deliveredOnTime = completedOrders > 0 ? Number(((onTimeCompletedOrders / completedOrders) * 100).toFixed(1)) : 0;
+
+    return res.status(200).json({
+      success: true,
+      message: "Admin provider details fetched successfully.",
+      data: {
+        provider: {
+          id: String(provider._id),
+          name: `${provider.firstName || ""} ${provider.lastName || ""}`.trim() || provider.email || "Provider",
+          firstName: provider.firstName || "",
+          lastName: provider.lastName || "",
+          email: provider.email || "",
+          avatar: provider.avatar || "",
+          phone: provider.phone || "",
+          address: provider.address || "",
+          bio: provider.businessBio || "",
+          experienceLevel: provider.experienceLevel || "",
+          sellerLevel: provider.sellerLevel || "New",
+          rating: Number(provider.averageRating) || 0,
+          reviewCount: Number(provider.reviewCount) || 0,
+          totalOrders,
+          completedOrders,
+          completionRate,
+          location: getPublicProviderLocation(provider),
+          joinedAt: provider.createdAt || null,
+          status: mapProviderVerificationStatus(provider),
+          onlineStatus: mapAdminPresenceStatus(provider._id),
+          walletBalance: roundMoney(provider.walletBalance || 0),
+          totalEarnings: roundMoney(provider.totalEarnings || 0),
+          totalWithdrawn: roundMoney(provider.totalWithdrawn || 0),
+          locationLat: typeof provider.locationLat === "number" ? provider.locationLat : null,
+          locationLng: typeof provider.locationLng === "number" ? provider.locationLng : null,
+          serviceLocationLat: typeof provider.serviceLocationLat === "number" ? provider.serviceLocationLat : null,
+          serviceLocationLng: typeof provider.serviceLocationLng === "number" ? provider.serviceLocationLng : null,
+        },
+        gigs,
+        reviews,
+        performance: {
+          responseRate,
+          deliveredOnTime,
           orderCompletion: completionRate,
         },
         skills: [...new Set(gigs.map((gig) => gig.categoryName).filter(Boolean))],
@@ -935,6 +1299,10 @@ const changePassword = async (req, res, next) => {
 module.exports = {
   getMyProfile,
   getPublicProviderProfile,
+  listAdminCustomers,
+  getAdminCustomerDetails,
+  listAdminProviders,
+  getAdminProviderDetails,
   uploadAvatar,
   updateProfile,
   changePassword,

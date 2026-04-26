@@ -5,7 +5,7 @@ const ServiceRequest = require("../models/ServiceRequest");
 const Order = require("../models/Order");
 const User = require("../models/User");
 const { emitToRole, emitToUser } = require("../socket");
-const { ensureConversationForOrder } = require("./chatController");
+const { ensureConversationForOrder, startServiceRequestNegotiationConversation } = require("./chatController");
 const slugify = require("../utils/slugify");
 
 const uploadBufferToCloudinary = (buffer, folder) => {
@@ -54,6 +54,10 @@ const createOrderNumber = () => {
 };
 
 const createNotificationId = (suffix = "") => `NTF-${Date.now()}${suffix ? `-${suffix}` : ""}`;
+const extractZipCodeFromText = (value = "") => {
+  const match = String(value || "").match(/\b\d{5}(?:-\d{4})?\b/);
+  return match ? match[0].slice(0, 5) : "";
+};
 
 const normalizePoint = (lat, lng) => {
   const nextLat = toFiniteNumber(lat);
@@ -137,6 +141,10 @@ const buildRequestSummary = (request, viewerId = null) => {
   const category = request.categoryId || {};
   const linkedOrder = request.linkedOrderId || null;
   const distanceKm = typeof request.distanceKm === "number" ? request.distanceKm : null;
+  const viewerInvitation = resolveViewerInvitation(request, viewerId);
+  const pendingInvitationCount = Array.isArray(request.adminInvitations)
+    ? request.adminInvitations.filter((item) => String(item?.status || "") === "pending").length
+    : 0;
 
   return {
     id: request._id,
@@ -165,12 +173,22 @@ const buildRequestSummary = (request, viewerId = null) => {
     imageUrls: Array.isArray(request.imageUrls) ? request.imageUrls : [],
     status: request.status || "open",
     acceptedAt: request.acceptedAt || null,
+    acceptedVia: request.acceptedVia || "",
     ignoredByViewer: Boolean(
       viewerId &&
         Array.isArray(request.ignoredByProviderIds) &&
         request.ignoredByProviderIds.some((id) => String(id) === String(viewerId))
     ),
     distanceKm,
+    adminRequestedForViewer: Boolean(viewerInvitation),
+    adminInvitationStatus: viewerInvitation?.status || "",
+    adminInvitedAt: viewerInvitation?.invitedAt || null,
+    assignedToOtherProvider: Boolean(
+      viewerInvitation &&
+        request.acceptedProviderId &&
+        String(request.acceptedProviderId?._id || request.acceptedProviderId) !== String(viewerId)
+    ),
+    pendingInvitationCount,
     client: {
       id: client._id || "",
       name: `${client.firstName || ""} ${client.lastName || ""}`.trim() || "Client",
@@ -524,26 +542,35 @@ const listProviderServiceRequests = async (req, res, next) => {
     const search = String(req.query.search || "").trim().toLowerCase();
     const skip = (page - 1) * limit;
 
+    const searchFilters = search
+      ? {
+          $or: [
+            { requestNumber: new RegExp(escapeRegex(search), "i") },
+            { categoryName: new RegExp(escapeRegex(search), "i") },
+            { categorySlug: new RegExp(escapeRegex(search), "i") },
+            { serviceAddress: new RegExp(escapeRegex(search), "i") },
+            { description: new RegExp(escapeRegex(search), "i") },
+            { preferredTime: new RegExp(escapeRegex(search), "i") },
+          ],
+        }
+      : {};
+
     const requests = await ServiceRequest.find({
-      status: "open",
-      acceptedProviderId: null,
-      ignoredByProviderIds: { $ne: req.user.id },
+      ...searchFilters,
       $or: [
-        { requestSource: { $ne: "custom_category" } },
-        { customCategoryApprovalStatus: "approved" },
+        {
+          status: "open",
+          acceptedProviderId: null,
+          ignoredByProviderIds: { $ne: req.user.id },
+          $or: [
+            { requestSource: { $ne: "custom_category" } },
+            { customCategoryApprovalStatus: "approved" },
+          ],
+        },
+        {
+          "adminInvitations.providerId": req.user.id,
+        },
       ],
-      ...(search
-        ? {
-            $or: [
-              { requestNumber: new RegExp(escapeRegex(search), "i") },
-              { categoryName: new RegExp(escapeRegex(search), "i") },
-              { categorySlug: new RegExp(escapeRegex(search), "i") },
-              { serviceAddress: new RegExp(escapeRegex(search), "i") },
-              { description: new RegExp(escapeRegex(search), "i") },
-              { preferredTime: new RegExp(escapeRegex(search), "i") },
-            ],
-          }
-        : {}),
     })
     .populate("clientId", "_id firstName lastName avatar email address locationLat locationLng")
     .populate("acceptedProviderId", "_id firstName lastName avatar sellerLevel averageRating")
@@ -561,8 +588,16 @@ const listProviderServiceRequests = async (req, res, next) => {
           distanceKm,
         };
       })
-      .filter((item) => Number.isFinite(item.distanceKm) && item.distanceKm <= radiusKm)
+      .filter((item) => {
+        const invitation = resolveViewerInvitation(item, req.user.id);
+        if (invitation) return true;
+        return Number.isFinite(item.distanceKm) && item.distanceKm <= radiusKm;
+      })
       .sort((a, b) => {
+        const invitationA = resolveViewerInvitation(a, req.user.id);
+        const invitationB = resolveViewerInvitation(b, req.user.id);
+        if (invitationA && !invitationB) return -1;
+        if (!invitationA && invitationB) return 1;
         const distanceDelta = (a.distanceKm || 0) - (b.distanceKm || 0);
         if (distanceDelta !== 0) return distanceDelta;
         return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
@@ -623,10 +658,23 @@ const acceptServiceRequest = async (req, res, next) => {
     }
 
     request.status = "accepted";
+    request.acceptedVia = "direct";
     const linkedOrder = await createOrderFromServiceRequest({
       request,
       providerId: req.user.id,
     });
+
+    if (Array.isArray(request.adminInvitations) && request.adminInvitations.length) {
+      request.adminInvitations = request.adminInvitations.map((item) => {
+        const matches = String(item.providerId?._id || item.providerId) === String(req.user.id);
+        return {
+          ...item,
+          status: matches ? "accepted" : "unavailable",
+          respondedAt: matches ? new Date() : item.respondedAt || new Date(),
+        };
+      });
+      await request.save({ validateBeforeSave: false });
+    }
 
     emitToUser(String(request.clientId?._id || request.clientId), "notification:new", {
       id: createNotificationId(),
@@ -697,6 +745,26 @@ const ignoreServiceRequest = async (req, res, next) => {
   } catch (error) {
     return next(error);
   }
+};
+
+const resolveViewerInvitation = (request, viewerId) => {
+  if (!viewerId || !Array.isArray(request?.adminInvitations)) return null;
+  return (
+    request.adminInvitations.find((item) => String(item?.providerId?._id || item?.providerId || "") === String(viewerId)) ||
+    null
+  );
+};
+
+const resolveRequestByReference = async (requestRef) => {
+  const normalized = String(requestRef || "").trim();
+  if (!normalized) return null;
+
+  if (mongoose.Types.ObjectId.isValid(normalized)) {
+    const byId = await ServiceRequest.findById(normalized);
+    if (byId) return byId;
+  }
+
+  return ServiceRequest.findOne({ requestNumber: normalized });
 };
 
 const shouldPublishToProviders = (request = {}) => {
@@ -932,12 +1000,292 @@ const approveServiceRequestCustomCategory = async (req, res, next) => {
   }
 };
 
+const inviteProvidersToServiceRequest = async (req, res, next) => {
+  try {
+    const { requestRef, providerIds = [] } = req.body || {};
+    const serviceRequest = await resolveRequestByReference(requestRef);
+
+    if (!serviceRequest) {
+      return res.status(404).json({ success: false, message: "Service request not found." });
+    }
+    if (String(serviceRequest.status || "") !== "open" || serviceRequest.acceptedProviderId) {
+      return res.status(400).json({ success: false, message: "This service request is no longer open for provider invitations." });
+    }
+    if (
+      String(serviceRequest.requestSource || "") === "custom_category" &&
+      String(serviceRequest.customCategoryApprovalStatus || "") !== "approved"
+    ) {
+      return res.status(400).json({ success: false, message: "Approve the custom category before inviting providers." });
+    }
+
+    const normalizedProviderIds = [...new Set((Array.isArray(providerIds) ? providerIds : []).map((item) => String(item || "").trim()).filter(Boolean))];
+    if (!normalizedProviderIds.length) {
+      return res.status(400).json({ success: false, message: "Select at least one provider." });
+    }
+
+    const providers = await User.find({
+      _id: { $in: normalizedProviderIds.filter((id) => mongoose.Types.ObjectId.isValid(id)).map((id) => new mongoose.Types.ObjectId(id)) },
+      role: "provider",
+    })
+      .select("_id firstName lastName email")
+      .lean();
+
+    if (!providers.length) {
+      return res.status(404).json({ success: false, message: "No matching providers found." });
+    }
+
+    const existingInvitations = Array.isArray(serviceRequest.adminInvitations) ? serviceRequest.adminInvitations : [];
+    const invitationMap = new Map(existingInvitations.map((item) => [String(item.providerId), item]));
+    const invitedProviders = [];
+
+    providers.forEach((provider) => {
+      const existing = invitationMap.get(String(provider._id));
+      if (existing) {
+        existing.status = "pending";
+        existing.invitedAt = new Date();
+        existing.invitedBy = req.user?.id || null;
+        existing.respondedAt = null;
+      } else {
+        existingInvitations.push({
+          providerId: provider._id,
+          invitedBy: req.user?.id || null,
+          invitedAt: new Date(),
+          status: "pending",
+          respondedAt: null,
+        });
+      }
+
+      emitToUser(String(provider._id), "notification:new", {
+        id: createNotificationId(String(provider._id)),
+        type: "system",
+        title: "Admin requested a provider review",
+        description: `Admin asked if you can handle ${serviceRequest.categoryName || "this request"} at ${serviceRequest.serviceAddress || "the requested location"}.`,
+        unread: true,
+        createdAt: new Date().toISOString(),
+        data: {
+          notificationType: "admin_service_request_invitation",
+          requestId: String(serviceRequest._id),
+          requestNumber: serviceRequest.requestNumber,
+          targetPath: "/provider/requests",
+        },
+      });
+
+      invitedProviders.push({
+        id: String(provider._id),
+        name: `${provider.firstName || ""} ${provider.lastName || ""}`.trim() || provider.email || "Provider",
+        email: provider.email || "",
+      });
+    });
+
+    serviceRequest.adminInvitations = existingInvitations;
+    await serviceRequest.save({ validateBeforeSave: false });
+
+    emitToRole("superAdmin", "notification:new", {
+      id: createNotificationId(String(serviceRequest._id)),
+      type: "system",
+      title: "Providers requested for service request",
+      description: `Admin sent ${invitedProviders.length} provider request${invitedProviders.length === 1 ? "" : "s"} for ${serviceRequest.requestNumber}.`,
+      unread: true,
+      createdAt: new Date().toISOString(),
+      data: {
+        notificationType: "admin_provider_invites_sent",
+        requestId: String(serviceRequest._id),
+        requestNumber: serviceRequest.requestNumber,
+        targetPath: `/service-requests?requestId=${String(serviceRequest._id)}`,
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Provider requests sent successfully.",
+      data: {
+        requestId: String(serviceRequest._id),
+        requestNumber: serviceRequest.requestNumber,
+        invitedProviders,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const respondToAdminServiceRequestInvitation = async (req, res, next) => {
+  try {
+    if (!req.user || !["provider", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: "Only providers can respond to admin invitations." });
+    }
+
+    const { action } = req.body || {};
+    if (!["accept", "decline"].includes(String(action || ""))) {
+      return res.status(400).json({ success: false, message: "Action must be accept or decline." });
+    }
+
+    const request = await ServiceRequest.findById(req.params.id)
+      .populate("clientId", "_id firstName lastName email avatar")
+      .populate("acceptedProviderId", "_id firstName lastName email avatar");
+
+    if (!request) {
+      return res.status(404).json({ success: false, message: "Service request not found." });
+    }
+
+    const invitation = resolveViewerInvitation(request, req.user.id);
+    if (!invitation) {
+      return res.status(404).json({ success: false, message: "No admin invitation found for this provider." });
+    }
+
+    if (String(invitation.status || "") !== "pending") {
+      return res.status(400).json({ success: false, message: "This admin invitation is already handled." });
+    }
+
+    if (request.acceptedProviderId && String(request.acceptedProviderId?._id || request.acceptedProviderId) !== String(req.user.id)) {
+      invitation.status = "unavailable";
+      invitation.respondedAt = new Date();
+      await request.save({ validateBeforeSave: false });
+      return res.status(409).json({
+        success: false,
+        message: "Another provider already accepted this request.",
+      });
+    }
+
+    if (action === "decline") {
+      invitation.status = "declined";
+      invitation.respondedAt = new Date();
+      await request.save({ validateBeforeSave: false });
+
+      emitToRole("superAdmin", "notification:new", {
+        id: createNotificationId(String(request._id)),
+        type: "warning",
+        title: "Provider declined admin request",
+        description: `${req.user.firstName || "A provider"} declined request ${request.requestNumber}.`,
+        unread: true,
+        createdAt: new Date().toISOString(),
+        data: {
+          notificationType: "admin_service_request_declined",
+          requestId: String(request._id),
+          requestNumber: request.requestNumber,
+          targetPath: `/service-requests?requestId=${String(request._id)}`,
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "Service request declined.",
+        data: {
+          request: buildRequestSummary(request, req.user.id),
+        },
+      });
+    }
+
+    const negotiationConversation = await startServiceRequestNegotiationConversation({
+      serviceRequestId: request._id,
+      clientId: request.clientId?._id || request.clientId,
+      providerId: req.user.id,
+      categoryName: request.categoryName,
+      requestNumber: request.requestNumber,
+    });
+
+    request.acceptedProviderId = req.user.id;
+    request.acceptedAt = new Date();
+    request.status = "accepted";
+    request.acceptedVia = "admin_invitation";
+    request.negotiationConversationId = negotiationConversation?._id || null;
+    request.adminInvitations = (request.adminInvitations || []).map((item) => {
+      const isCurrent = String(item.providerId?._id || item.providerId) === String(req.user.id);
+      return {
+        ...item,
+        status: isCurrent ? "accepted" : String(item.status || "") === "pending" ? "unavailable" : item.status,
+        respondedAt: isCurrent || String(item.status || "") === "pending" ? new Date() : item.respondedAt || null,
+      };
+    });
+    await request.save({ validateBeforeSave: false });
+
+    const conversationId = negotiationConversation ? String(negotiationConversation._id) : "";
+    emitToUser(String(request.clientId?._id || request.clientId), "notification:new", {
+      id: createNotificationId(String(request._id)),
+      type: "success",
+      title: "A provider is ready to negotiate",
+      description: `${req.user.firstName || "A provider"} accepted your request for ${request.categoryName || "this service"}.`,
+      unread: true,
+      createdAt: new Date().toISOString(),
+      data: {
+        notificationType: "service_request_negotiation_started",
+        requestId: String(request._id),
+        requestNumber: request.requestNumber,
+        conversationId,
+        targetPath: conversationId ? `/messages?conversationId=${conversationId}` : "/messages",
+      },
+    });
+    emitToUser(String(req.user.id), "notification:new", {
+      id: createNotificationId(`${String(request._id)}-provider`),
+      type: "success",
+      title: "Negotiation started",
+      description: `You accepted ${request.requestNumber}. Continue with the client in inbox.`,
+      unread: true,
+      createdAt: new Date().toISOString(),
+      data: {
+        notificationType: "service_request_negotiation_started_provider",
+        requestId: String(request._id),
+        requestNumber: request.requestNumber,
+        conversationId,
+        targetPath: conversationId ? `/messages?conversationId=${conversationId}` : "/messages",
+      },
+    });
+    emitToRole("superAdmin", "notification:new", {
+      id: createNotificationId(`${String(request._id)}-admin`),
+      type: "success",
+      title: "Provider accepted admin request",
+      description: `${req.user.firstName || "A provider"} accepted request ${request.requestNumber}.`,
+      unread: true,
+      createdAt: new Date().toISOString(),
+      data: {
+        notificationType: "admin_service_request_accepted",
+        requestId: String(request._id),
+        requestNumber: request.requestNumber,
+        conversationId,
+        targetPath: `/service-requests?requestId=${String(request._id)}`,
+      },
+    });
+
+    (request.adminInvitations || []).forEach((item) => {
+      const providerId = String(item.providerId?._id || item.providerId || "");
+      if (!providerId || providerId === String(req.user.id) || String(item.status || "") !== "unavailable") return;
+      emitToUser(providerId, "notification:new", {
+        id: createNotificationId(`${String(request._id)}-${providerId}`),
+        type: "warning",
+        title: "Request already accepted",
+        description: `Another provider already accepted ${request.requestNumber}, so you can no longer accept it.`,
+        unread: true,
+        createdAt: new Date().toISOString(),
+        data: {
+          notificationType: "admin_service_request_unavailable",
+          requestId: String(request._id),
+          requestNumber: request.requestNumber,
+          targetPath: "/provider/requests",
+        },
+      });
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Negotiation started with the client.",
+      data: {
+        request: buildRequestSummary(request, req.user.id),
+        conversationId,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 module.exports = {
   createServiceRequest,
   listClientServiceRequests,
   listProviderServiceRequests,
   listAdminServiceRequests,
   approveServiceRequestCustomCategory,
+  inviteProvidersToServiceRequest,
+  respondToAdminServiceRequestInvitation,
   acceptServiceRequest,
   ignoreServiceRequest,
 };
