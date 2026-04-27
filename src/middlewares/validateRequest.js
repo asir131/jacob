@@ -96,9 +96,72 @@ const validateRefreshTokenRequest = (req, res, next) => {
   next();
 };
 
+const validateForgotPasswordRequest = (req, res, next) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({
+      success: false,
+      message: "Email is required.",
+    });
+  }
+
+  if (!isValidEmail(email)) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid email address.",
+    });
+  }
+
+  next();
+};
+
+const validateResetPasswordRequest = (req, res, next) => {
+  const { email, otp, resetToken, newPassword, confirmPassword } = req.body;
+
+  if (!email || !otp || !resetToken || !newPassword || !confirmPassword) {
+    return res.status(400).json({
+      success: false,
+      message: "Email, OTP, reset token, new password, and confirm password are required.",
+    });
+  }
+
+  if (!isValidEmail(email)) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid email address.",
+    });
+  }
+
+  if (!/^\d{4}$/.test(String(otp))) {
+    return res.status(400).json({
+      success: false,
+      message: "OTP must be exactly 4 digits.",
+    });
+  }
+
+  if (String(newPassword).length < 8) {
+    return res.status(400).json({
+      success: false,
+      message: "New password must be at least 8 characters.",
+    });
+  }
+
+  if (newPassword !== confirmPassword) {
+    return res.status(400).json({
+      success: false,
+      message: "Passwords do not match.",
+    });
+  }
+
+  next();
+};
+
 module.exports = {
   validateSignupRequest,
   validateVerifyOtpRequest,
   validateLoginRequest,
   validateRefreshTokenRequest,
+  validateForgotPasswordRequest,
+  validateResetPasswordRequest,
 };

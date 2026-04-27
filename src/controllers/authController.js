@@ -3,9 +3,10 @@ const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const User = require("../models/User");
 const OtpVerification = require("../models/OtpVerification");
+const PasswordResetOtp = require("../models/PasswordResetOtp");
 const RefreshToken = require("../models/RefreshToken");
 const generateOtp = require("../utils/generateOtp");
-const { sendOtpEmail } = require("../utils/sendEmail");
+const { sendOtpEmail, sendPasswordResetOtpEmail } = require("../utils/sendEmail");
 
 const OTP_EXP_MINUTES = 10;
 const ACCESS_TOKEN_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "15m";
@@ -325,10 +326,165 @@ const logout = async (req, res, next) => {
   }
 };
 
+const requestPasswordResetOtp = async (req, res, next) => {
+  try {
+    const { email } = req.body;
+    const normalizedEmail = email.toLowerCase().trim();
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "No account found with this email.",
+      });
+    }
+
+    const otp = generateOtp();
+    const expiresAt = new Date(Date.now() + OTP_EXP_MINUTES * 60 * 1000);
+
+    await PasswordResetOtp.findOneAndUpdate(
+      { email: normalizedEmail },
+      {
+        email: normalizedEmail,
+        userId: user._id,
+        otp,
+        resetToken: "",
+        verifiedAt: null,
+        expiresAt,
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    await sendPasswordResetOtpEmail({
+      email: normalizedEmail,
+      firstName: user.firstName,
+      otp,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "OTP sent to your email.",
+      data: {
+        email: normalizedEmail,
+        otpExpiresInMinutes: OTP_EXP_MINUTES,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const verifyPasswordResetOtp = async (req, res, next) => {
+  try {
+    const { email, otp } = req.body;
+    const normalizedEmail = email.toLowerCase().trim();
+
+    const resetRequest = await PasswordResetOtp.findOne({ email: normalizedEmail });
+    if (!resetRequest) {
+      return res.status(404).json({
+        success: false,
+        message: "No password reset request found for this email.",
+      });
+    }
+
+    if (resetRequest.expiresAt.getTime() < Date.now()) {
+      await PasswordResetOtp.deleteOne({ _id: resetRequest._id });
+      return res.status(400).json({
+        success: false,
+        message: "OTP expired. Please request a new code.",
+      });
+    }
+
+    if (resetRequest.otp !== String(otp)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid OTP.",
+      });
+    }
+
+    resetRequest.verifiedAt = new Date();
+    resetRequest.resetToken = crypto.randomUUID();
+    await resetRequest.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "OTP verified successfully.",
+      data: {
+        email: normalizedEmail,
+        resetToken: resetRequest.resetToken,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const resetPasswordWithOtp = async (req, res, next) => {
+  try {
+    const { email, otp, resetToken, newPassword } = req.body;
+    const normalizedEmail = email.toLowerCase().trim();
+
+    const resetRequest = await PasswordResetOtp.findOne({ email: normalizedEmail });
+    if (!resetRequest) {
+      return res.status(404).json({
+        success: false,
+        message: "No password reset request found for this email.",
+      });
+    }
+
+    if (resetRequest.expiresAt.getTime() < Date.now()) {
+      await PasswordResetOtp.deleteOne({ _id: resetRequest._id });
+      return res.status(400).json({
+        success: false,
+        message: "OTP expired. Please request a new code.",
+      });
+    }
+
+    if (resetRequest.otp !== String(otp) || !resetRequest.verifiedAt || resetRequest.resetToken !== String(resetToken)) {
+      return res.status(400).json({
+        success: false,
+        message: "Password reset session is invalid. Please verify OTP again.",
+      });
+    }
+
+    const user = await User.findById(resetRequest.userId);
+    if (!user) {
+      await PasswordResetOtp.deleteOne({ _id: resetRequest._id });
+      return res.status(404).json({
+        success: false,
+        message: "User not found.",
+      });
+    }
+
+    const isSamePassword = await bcrypt.compare(newPassword, user.password);
+    if (isSamePassword) {
+      return res.status(400).json({
+        success: false,
+        message: "New password must be different from current password.",
+      });
+    }
+
+    user.password = await bcrypt.hash(newPassword, 10);
+    await user.save();
+
+    await PasswordResetOtp.deleteOne({ _id: resetRequest._id });
+
+    return res.status(200).json({
+      success: true,
+      message: "Password reset successful.",
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 module.exports = {
   signup,
   verifySignupOtp,
   login,
   refreshAccessToken,
   logout,
+  requestPasswordResetOtp,
+  verifyPasswordResetOtp,
+  resetPasswordWithOtp,
 };

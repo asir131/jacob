@@ -569,6 +569,7 @@ const listProviderServiceRequests = async (req, res, next) => {
         },
         {
           "adminInvitations.providerId": req.user.id,
+          linkedOrderId: null,
         },
       ],
     })

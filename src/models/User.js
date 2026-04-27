@@ -159,6 +159,24 @@ const userSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    clientWebsiteReviewSubmittedAt: {
+      type: Date,
+      default: null,
+    },
+    providerWebsiteReviewSubmittedAt: {
+      type: Date,
+      default: null,
+    },
+    clientWebsiteReviewDeferredOrderCount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    providerWebsiteReviewDeferredOrderCount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     sellerLevel: {
       type: String,
       enum: ["New", "Level 1", "Level 2", "Level 3", "Top Rated"],

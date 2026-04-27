@@ -1,5 +1,6 @@
 const Category = require("../models/Category");
 const Gig = require("../models/Gig");
+const GigAnalyticsEvent = require("../models/GigAnalyticsEvent");
 const GigRequest = require("../models/GigRequest");
 const Order = require("../models/Order");
 const mongoose = require("mongoose");
@@ -919,6 +920,25 @@ const calculateDistanceKm = (fromLat, fromLng, toLat, toLng) => {
   return Number((earthRadiusKm * c).toFixed(1));
 };
 
+const fillDailySeries = (rows = [], totalDays = 14) => {
+  const byDate = new Map(rows.map((row) => [row._id, Number(row.count) || 0]));
+  const series = [];
+
+  for (let offset = totalDays - 1; offset >= 0; offset -= 1) {
+    const current = new Date();
+    current.setHours(0, 0, 0, 0);
+    current.setDate(current.getDate() - offset);
+    const key = current.toISOString().slice(0, 10);
+    series.push({
+      date: key,
+      label: current.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+      count: byDate.get(key) || 0,
+    });
+  }
+
+  return series;
+};
+
 const listPublicServices = async (req, res, next) => {
   try {
     const page = Math.max(1, Number(req.query.page) || 1);
@@ -1075,6 +1095,81 @@ const listPublicServices = async (req, res, next) => {
   }
 };
 
+const trackGigImpressions = async (req, res, next) => {
+  try {
+    if (!req.user || req.user.role !== "client") {
+      return res.status(200).json({
+        success: true,
+        message: "No gig impressions tracked for this user.",
+        data: {
+          trackedGigIds: [],
+        },
+      });
+    }
+
+    const rawGigIds = Array.isArray(req.body?.gigIds) ? req.body.gigIds : [];
+    const gigIds = [...new Set(rawGigIds.map((value) => String(value || "").trim()).filter(Boolean))]
+      .filter((value) => mongoose.Types.ObjectId.isValid(value));
+
+    if (!gigIds.length) {
+      return res.status(200).json({
+        success: true,
+        message: "No gig impressions tracked.",
+        data: {
+          trackedGigIds: [],
+        },
+      });
+    }
+
+    const publishedGigIds = await Gig.find({
+      _id: { $in: gigIds.map((id) => new mongoose.Types.ObjectId(id)) },
+      status: "published",
+    })
+      .select("_id")
+      .lean();
+
+    const validGigIds = publishedGigIds.map((item) => String(item._id));
+    if (!validGigIds.length) {
+      return res.status(200).json({
+        success: true,
+        message: "No published gig impressions tracked.",
+        data: {
+          trackedGigIds: [],
+        },
+      });
+    }
+
+    await GigAnalyticsEvent.bulkWrite(
+      validGigIds.map((gigId) => ({
+        updateOne: {
+          filter: {
+            gigId: new mongoose.Types.ObjectId(gigId),
+            clientId: new mongoose.Types.ObjectId(req.user.id),
+            eventType: "services_impression",
+          },
+          update: {
+            $setOnInsert: {
+              firstSeenAt: new Date(),
+            },
+          },
+          upsert: true,
+        },
+      })),
+      { ordered: false }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Gig impressions tracked successfully.",
+      data: {
+        trackedGigIds: validGigIds,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 const getPublicServiceById = async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -1184,6 +1279,152 @@ const getPublicServiceById = async (req, res, next) => {
   }
 };
 
+const trackGigDetailView = async (req, res, next) => {
+  try {
+    if (!req.user || req.user.role !== "client") {
+      return res.status(200).json({
+        success: true,
+        message: "No gig detail view tracked for this user.",
+        data: {
+          tracked: false,
+        },
+      });
+    }
+
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found.",
+      });
+    }
+
+    const gig = await Gig.findOne({ _id: id, status: "published" }).select("_id").lean();
+    if (!gig) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found.",
+      });
+    }
+
+    await GigAnalyticsEvent.updateOne(
+      {
+        gigId: new mongoose.Types.ObjectId(id),
+        clientId: new mongoose.Types.ObjectId(req.user.id),
+        eventType: "service_detail_view",
+      },
+      {
+        $setOnInsert: {
+          firstSeenAt: new Date(),
+        },
+      },
+      { upsert: true }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Gig detail view tracked successfully.",
+      data: {
+        tracked: true,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const getGigAnalytics = async (req, res, next) => {
+  try {
+    if (!req.user || !["provider", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only providers can view gig analytics.",
+      });
+    }
+
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(404).json({
+        success: false,
+        message: "Gig not found.",
+      });
+    }
+
+    const gig = await Gig.findById(id).select("_id providerId title status").lean();
+    if (!gig) {
+      return res.status(404).json({
+        success: false,
+        message: "Gig not found.",
+      });
+    }
+
+    if (req.user.role !== "superAdmin" && String(gig.providerId) !== String(req.user.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "You are not allowed to view analytics for this gig.",
+      });
+    }
+
+    const [servicesPageVisibleClients, detailPageUniqueClients, detailViewRows] = await Promise.all([
+      GigAnalyticsEvent.countDocuments({
+        gigId: gig._id,
+        eventType: "services_impression",
+      }),
+      GigAnalyticsEvent.countDocuments({
+        gigId: gig._id,
+        eventType: "service_detail_view",
+      }),
+      GigAnalyticsEvent.aggregate([
+        {
+          $match: {
+            gigId: gig._id,
+            eventType: "service_detail_view",
+            firstSeenAt: {
+              $gte: (() => {
+                const date = new Date();
+                date.setHours(0, 0, 0, 0);
+                date.setDate(date.getDate() - 13);
+                return date;
+              })(),
+            },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              $dateToString: {
+                format: "%Y-%m-%d",
+                date: "$firstSeenAt",
+              },
+            },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      message: "Gig analytics fetched successfully.",
+      data: {
+        gig: {
+          id: String(gig._id),
+          title: gig.title || "",
+          status: gig.status || "draft",
+        },
+        summary: {
+          servicesPageVisibleClients,
+          detailPageUniqueClients,
+        },
+        detailViewSeries: fillDailySeries(detailViewRows, 14),
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 module.exports = {
   createGig,
   updateGig,
@@ -1194,5 +1435,8 @@ module.exports = {
   approveGigRequest,
   rejectGigRequest,
   listPublicServices,
+  trackGigImpressions,
   getPublicServiceById,
+  trackGigDetailView,
+  getGigAnalytics,
 };

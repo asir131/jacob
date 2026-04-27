@@ -12,7 +12,10 @@ const {
   approveGigRequest,
   rejectGigRequest,
   listPublicServices,
+  trackGigImpressions,
   getPublicServiceById,
+  trackGigDetailView,
+  getGigAnalytics,
 } = require("../controllers/gigController");
 
 const router = express.Router();
@@ -29,8 +32,11 @@ router.put("/:id", requireAuth, upload.array("images", 4), updateGig);
 router.delete("/:id", requireAuth, deleteGig);
 router.delete("/requests/:id", requireAuth, deleteGigRequest);
 router.get("/mine", requireAuth, listMyGigs);
+router.post("/analytics/impressions", requireAuth, trackGigImpressions);
 router.get("/public", listPublicServices);
+router.post("/public/:id/view", requireAuth, trackGigDetailView);
 router.get("/public/:id", getPublicServiceById);
+router.get("/:id/analytics", requireAuth, getGigAnalytics);
 router.get("/pending", requireAuth, requireAdmin, listPendingGigRequests);
 router.post("/:id/approve", requireAuth, requireAdmin, approveGigRequest);
 router.post("/:id/reject", requireAuth, requireAdmin, rejectGigRequest);
