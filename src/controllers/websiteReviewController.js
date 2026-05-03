@@ -1,8 +1,10 @@
 const Order = require("../models/Order");
 const User = require("../models/User");
 const WebsiteReview = require("../models/WebsiteReview");
+const WithdrawalRequest = require("../models/WithdrawalRequest");
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+const SIX_MONTHS_MS = 180 * 24 * 60 * 60 * 1000;
 
 const resolveContext = (value, fallbackRole = "client") =>
   value === "provider" ? "provider" : fallbackRole === "provider" ? "provider" : "client";
@@ -47,6 +49,65 @@ const buildPromptPayload = async ({ userId, context }) => {
     submittedAt,
     deferredOrderCount,
     shouldPrompt,
+  };
+};
+
+const buildSuccessStoryStats = async () => {
+  const now = Date.now();
+  const currentWindowStart = new Date(now - THIRTY_DAYS_MS);
+  const baselineWindowStart = new Date(now - SIX_MONTHS_MS);
+  const baselineWindowEnd = new Date(baselineWindowStart.getTime() + THIRTY_DAYS_MS);
+
+  const [
+    providerBalanceRows,
+    pendingWithdrawalRows,
+    activeVerifiedProviders,
+    currentIncomeRows,
+    baselineIncomeRows,
+  ] = await Promise.all([
+    User.aggregate([
+      { $match: { role: "provider" } },
+      { $group: { _id: null, total: { $sum: "$walletBalance" } } },
+    ]),
+    WithdrawalRequest.aggregate([
+      { $match: { status: { $in: ["pending", "approved"] } } },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]),
+    User.countDocuments({ role: "provider", payoutVerificationStatus: "verified" }),
+    Order.aggregate([
+      {
+        $match: {
+          status: "completed",
+          paymentStatus: "paid",
+          paidAt: { $gte: currentWindowStart },
+        },
+      },
+      { $group: { _id: null, total: { $sum: "$providerEarningsAmount" } } },
+    ]),
+    Order.aggregate([
+      {
+        $match: {
+          status: "completed",
+          paymentStatus: "paid",
+          paidAt: { $gte: baselineWindowStart, $lt: baselineWindowEnd },
+        },
+      },
+      { $group: { _id: null, total: { $sum: "$providerEarningsAmount" } } },
+    ]),
+  ]);
+
+  const totalProviderBalance = Number(providerBalanceRows?.[0]?.total || 0);
+  const pendingWithdrawalAmount = Number(pendingWithdrawalRows?.[0]?.total || 0);
+  const totalProviderWithdrawable = Math.max(totalProviderBalance - pendingWithdrawalAmount, 0);
+  const currentIncome = Number(currentIncomeRows?.[0]?.total || 0);
+  const baselineIncome = Number(baselineIncomeRows?.[0]?.total || 0);
+  const sixMonthIncomeGrowthPercent =
+    baselineIncome > 0 ? ((currentIncome - baselineIncome) / baselineIncome) * 100 : currentIncome > 0 ? 100 : 0;
+
+  return {
+    totalProviderWithdrawable,
+    activeVerifiedProviders,
+    sixMonthIncomeGrowthPercent: Math.round(sixMonthIncomeGrowthPercent),
   };
 };
 
@@ -163,7 +224,7 @@ const getPublicWebsiteReviews = async (_req, res, next) => {
     const reviews = await WebsiteReview.find({})
       .populate(
         "reviewerId",
-        "_id firstName lastName avatar role sellerLevel averageRating totalEarnings"
+        "_id firstName lastName avatar role address serviceCity sellerLevel averageRating totalEarnings"
       )
       .sort({ createdAt: -1 })
       .lean();
@@ -179,7 +240,7 @@ const getPublicWebsiteReviews = async (_req, res, next) => {
     const clientIds = clientReviews.map((item) => item.reviewerId?._id).filter(Boolean);
     const since = new Date(Date.now() - THIRTY_DAYS_MS);
 
-    const [providerIncomeRows, clientSpendingRows] = await Promise.all([
+    const [providerIncomeRows, clientSpendingRows, stats] = await Promise.all([
       providerIds.length
         ? Order.aggregate([
             {
@@ -216,6 +277,7 @@ const getPublicWebsiteReviews = async (_req, res, next) => {
             },
           ])
         : [],
+      buildSuccessStoryStats(),
     ]);
 
     const providerIncomeMap = new Map(
@@ -228,9 +290,9 @@ const getPublicWebsiteReviews = async (_req, res, next) => {
     const usedProviderIds = new Set();
     const topProviderReviews = providerReviews
       .sort((a, b) => {
-        const ratingA = Number(a.reviewerId?.averageRating || 0);
-        const ratingB = Number(b.reviewerId?.averageRating || 0);
-        if (ratingA !== ratingB) return ratingB - ratingA;
+        const incomeA = providerIncomeMap.get(String(a.reviewerId?._id || "")) || 0;
+        const incomeB = providerIncomeMap.get(String(b.reviewerId?._id || "")) || 0;
+        if (incomeA !== incomeB) return incomeB - incomeA;
         return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
       })
       .filter((item) => {
@@ -249,6 +311,7 @@ const getPublicWebsiteReviews = async (_req, res, next) => {
           id: String(item.reviewerId?._id || ""),
           name: `${item.reviewerId?.firstName || ""} ${item.reviewerId?.lastName || ""}`.trim() || "Provider",
           avatar: item.reviewerId?.avatar || "",
+          location: item.reviewerId?.serviceCity || item.reviewerId?.address || "",
           sellerLevel: item.reviewerId?.sellerLevel || "New",
           providerRating: Number(item.reviewerId?.averageRating || 0),
           monthlyIncome: providerIncomeMap.get(String(item.reviewerId?._id || "")) || 0,
@@ -256,7 +319,13 @@ const getPublicWebsiteReviews = async (_req, res, next) => {
       }));
 
     const latestClientReviews = clientReviews
-      .slice(0, 6)
+      .sort((a, b) => {
+        const spendingA = clientSpendingMap.get(String(a.reviewerId?._id || "")) || 0;
+        const spendingB = clientSpendingMap.get(String(b.reviewerId?._id || "")) || 0;
+        if (spendingA !== spendingB) return spendingB - spendingA;
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      })
+      .slice(0, 3)
       .map((item) => ({
         id: String(item._id),
         reviewText: item.reviewText || "",
@@ -266,6 +335,7 @@ const getPublicWebsiteReviews = async (_req, res, next) => {
           id: String(item.reviewerId?._id || ""),
           name: `${item.reviewerId?.firstName || ""} ${item.reviewerId?.lastName || ""}`.trim() || "Client",
           avatar: item.reviewerId?.avatar || "",
+          location: item.reviewerId?.address || "",
           monthlySpending: clientSpendingMap.get(String(item.reviewerId?._id || "")) || 0,
         },
       }));
@@ -273,6 +343,7 @@ const getPublicWebsiteReviews = async (_req, res, next) => {
     return res.status(200).json({
       success: true,
       data: {
+        stats,
         providerReviews: topProviderReviews,
         clientReviews: latestClientReviews,
       },

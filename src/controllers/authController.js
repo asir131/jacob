@@ -1,6 +1,7 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const { OAuth2Client } = require("google-auth-library");
 const User = require("../models/User");
 const OtpVerification = require("../models/OtpVerification");
 const PasswordResetOtp = require("../models/PasswordResetOtp");
@@ -11,6 +12,17 @@ const { sendOtpEmail, sendPasswordResetOtpEmail } = require("../utils/sendEmail"
 const OTP_EXP_MINUTES = 10;
 const ACCESS_TOKEN_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "15m";
 const REFRESH_TOKEN_EXPIRES_IN = "30d";
+const googleClient = new OAuth2Client();
+
+const getGoogleAudiences = () =>
+  [
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_WEB_CLIENT_ID,
+    process.env.GOOGLE_ANDROID_CLIENT_ID,
+    process.env.GOOGLE_IOS_CLIENT_ID,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
 
 const createAccessToken = (user) => {
   return jwt.sign(
@@ -326,6 +338,98 @@ const logout = async (req, res, next) => {
   }
 };
 
+const loginWithGoogle = async (req, res, next) => {
+  try {
+    const { idToken, role = "client" } = req.body;
+    const audiences = getGoogleAudiences();
+
+    if (!idToken) {
+      return res.status(400).json({
+        success: false,
+        message: "Google login token is required.",
+      });
+    }
+
+    if (!audiences.length) {
+      return res.status(500).json({
+        success: false,
+        message: "Google login is not configured on the server.",
+      });
+    }
+
+    const ticket = await googleClient.verifyIdToken({
+      idToken,
+      audience: audiences,
+    });
+    const payload = ticket.getPayload();
+
+    if (!payload?.email || !payload.email_verified) {
+      return res.status(401).json({
+        success: false,
+        message: "Google account email is not verified.",
+      });
+    }
+
+    const normalizedEmail = payload.email.toLowerCase().trim();
+    let user = await User.findOne({ email: normalizedEmail });
+
+    if (!user) {
+      const requestedRole = ["client", "provider"].includes(role) ? role : "client";
+      const fallbackName = normalizedEmail.split("@")[0] || "Google User";
+      const firstName = String(payload.given_name || payload.name || fallbackName).trim();
+      const lastName = String(payload.family_name || "").trim();
+
+      user = await User.create({
+        firstName,
+        lastName,
+        email: normalizedEmail,
+        password: await bcrypt.hash(crypto.randomUUID(), 10),
+        role: requestedRole,
+        avatar: payload.picture || "",
+        authProvider: "google",
+        googleId: payload.sub || "",
+        isVerified: true,
+      });
+    } else {
+      let shouldSave = false;
+      if (!user.googleId && payload.sub) {
+        user.googleId = payload.sub;
+        shouldSave = true;
+      }
+      if (user.authProvider !== "google") {
+        user.authProvider = "google";
+        shouldSave = true;
+      }
+      if (!user.avatar && payload.picture) {
+        user.avatar = payload.picture;
+        shouldSave = true;
+      }
+      if (!user.isVerified) {
+        user.isVerified = true;
+        shouldSave = true;
+      }
+      if (shouldSave) await user.save();
+    }
+
+    const accessToken = createAccessToken(user);
+    const refreshToken = await createRefreshToken(user);
+
+    return res.status(200).json({
+      success: true,
+      message: "Google login successful.",
+      data: buildAuthPayload(user, accessToken, refreshToken),
+    });
+  } catch (error) {
+    if (error.message?.includes("Wrong number of segments") || error.message?.includes("Token used too late")) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid Google login token.",
+      });
+    }
+    return next(error);
+  }
+};
+
 const requestPasswordResetOtp = async (req, res, next) => {
   try {
     const { email } = req.body;
@@ -482,6 +586,7 @@ module.exports = {
   signup,
   verifySignupOtp,
   login,
+  loginWithGoogle,
   refreshAccessToken,
   logout,
   requestPasswordResetOtp,
