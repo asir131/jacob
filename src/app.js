@@ -16,7 +16,7 @@ const chatRoutes = require("./routes/chatRoutes");
 const errorHandler = require("./middlewares/errorHandler");
 
 const app = express();
-const corsOrigins = (process.env.CORS_ORIGIN || "http://localhost:3000")
+const corsOrigins = (process.env.CORS_ORIGIN || "http://localhost:3000,http://localhost:3001")
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);

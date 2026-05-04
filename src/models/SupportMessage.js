@@ -33,6 +33,12 @@ const supportMessageSchema = new mongoose.Schema(
       ref: "User",
       default: null,
     },
+    conversationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Conversation",
+      default: null,
+      index: true,
+    },
     resolvedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",

@@ -1,4 +1,8 @@
+const mongoose = require("mongoose");
 const SupportMessage = require("../models/SupportMessage");
+const Conversation = require("../models/Conversation");
+const Message = require("../models/Message");
+const User = require("../models/User");
 const { emitToRole } = require("../socket");
 
 const normalizeSupportMessage = (item) => ({
@@ -8,10 +12,61 @@ const normalizeSupportMessage = (item) => ({
   subject: item.subject || "",
   message: item.message || "",
   status: item.status || "pending",
+  userId: item.userId?._id ? String(item.userId._id) : item.userId ? String(item.userId) : "",
+  conversationId: item.conversationId ? String(item.conversationId) : "",
+  user: item.userId?._id
+    ? {
+        id: String(item.userId._id),
+        firstName: item.userId.firstName || "",
+        lastName: item.userId.lastName || "",
+        name: `${item.userId.firstName || ""} ${item.userId.lastName || ""}`.trim() || item.fullName || "User",
+        email: item.userId.email || item.email || "",
+        role: item.userId.role || "",
+        avatar: item.userId.avatar || "",
+      }
+    : null,
   createdAt: item.createdAt || null,
   updatedAt: item.updatedAt || null,
   resolvedAt: item.resolvedAt || null,
 });
+
+const normalizeConversation = (conversation, currentUserId) => {
+  const participants = Array.isArray(conversation?.participants) ? conversation.participants : [];
+  const otherUser = participants.find((user) => String(user?._id || user) !== String(currentUserId));
+
+  return {
+    id: String(conversation._id),
+    blockedBy: conversation.blockedBy || null,
+    lastMessage: conversation.lastMessage || "",
+    lastMessageAt: conversation.lastMessageAt || conversation.updatedAt || conversation.createdAt,
+    otherUser: {
+      id: otherUser?._id ? String(otherUser._id) : "",
+      name: `${otherUser?.firstName || ""} ${otherUser?.lastName || ""}`.trim() || "User",
+      email: otherUser?.email || "",
+      avatar: otherUser?.avatar || "",
+      role: otherUser?.role || "",
+    },
+  };
+};
+
+const normalizeChatMessage = (message) => ({
+  id: String(message._id),
+  conversationId: String(message.conversationId),
+  orderId: message.orderId || null,
+  senderId: message.senderId?._id ? String(message.senderId._id) : String(message.senderId || ""),
+  receiverId: message.receiverId?._id ? String(message.receiverId._id) : String(message.receiverId || ""),
+  text: message.text || "",
+  messageType: message.messageType || "text",
+  attachments: Array.isArray(message.attachments) ? message.attachments : [],
+  createdAt: message.createdAt,
+  readAt: message.readAt || null,
+});
+
+const hydrateConversation = (conversationId) =>
+  Conversation.findById(conversationId)
+    .populate("participants", "_id firstName lastName email avatar role")
+    .select("_id participants blockedBy lastMessage lastMessageAt updatedAt createdAt")
+    .lean();
 
 const createSupportMessage = async (req, res, next) => {
   try {
@@ -27,12 +82,13 @@ const createSupportMessage = async (req, res, next) => {
       });
     }
 
+    const matchedUser = await User.findOne({ email }).select("_id").lean();
     const supportMessage = await SupportMessage.create({
       fullName,
       email,
       subject,
       message,
-      userId: req.user?.id || null,
+      userId: req.user?.id || matchedUser?._id || null,
     });
 
     emitToRole("superAdmin", "notification:new", {
@@ -62,11 +118,167 @@ const createSupportMessage = async (req, res, next) => {
 
 const listSupportMessages = async (req, res, next) => {
   try {
-    const items = await SupportMessage.find({}).sort({ createdAt: -1 }).lean();
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 15));
+    const skip = (page - 1) * limit;
+
+    const [items, totalItems] = await Promise.all([
+      SupportMessage.find({})
+        .populate("userId", "_id firstName lastName email avatar role")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      SupportMessage.countDocuments({}),
+    ]);
+    const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+
     return res.status(200).json({
       success: true,
       message: "Support messages fetched successfully.",
-      data: items.map(normalizeSupportMessage),
+      data: {
+        items: items.map(normalizeSupportMessage),
+        pagination: {
+          page,
+          limit,
+          totalItems,
+          totalPages,
+          hasNextPage: page < totalPages,
+          hasPrevPage: page > 1,
+        },
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const startSupportConversation = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid support message id.",
+      });
+    }
+
+    const supportMessage = await SupportMessage.findById(id);
+    if (!supportMessage) {
+      return res.status(404).json({
+        success: false,
+        message: "Support message not found.",
+      });
+    }
+
+    const supportUser =
+      (supportMessage.userId && (await User.findById(supportMessage.userId).select("_id firstName lastName email avatar role"))) ||
+      (await User.findOne({ email: supportMessage.email }).select("_id firstName lastName email avatar role"));
+
+    if (!supportUser) {
+      return res.status(404).json({
+        success: false,
+        message: "No platform account found for this support email.",
+      });
+    }
+
+    if (!supportMessage.userId) {
+      supportMessage.userId = supportUser._id;
+    }
+
+    const adminId = req.user.id;
+    let conversation = supportMessage.conversationId
+      ? await Conversation.findById(supportMessage.conversationId)
+      : null;
+    const conversationParticipantIds = Array.isArray(conversation?.participants)
+      ? conversation.participants.map((participantId) => String(participantId))
+      : [];
+
+    if (
+      conversation &&
+      (!conversationParticipantIds.includes(String(adminId)) ||
+        !conversationParticipantIds.includes(String(supportUser._id)))
+    ) {
+      conversation = null;
+      supportMessage.conversationId = null;
+    }
+
+    if (!conversation) {
+      conversation = await Conversation.findOne({
+        orderId: null,
+        serviceRequestId: null,
+        participants: { $all: [adminId, supportUser._id] },
+        $expr: { $eq: [{ $size: "$participants" }, 2] },
+      });
+    }
+
+    if (!conversation) {
+      conversation = await Conversation.create({
+        orderId: null,
+        gigId: null,
+        serviceRequestId: null,
+        participants: [adminId, supportUser._id],
+        blockedBy: null,
+        lastMessage: "",
+        lastMessageAt: null,
+      });
+    }
+
+    if (!supportMessage.conversationId) {
+      const ticketText = [
+        `Support ticket: ${supportMessage.subject}`,
+        supportMessage.message,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+
+      const existingTicketMessage = await Message.findOne({
+        conversationId: conversation._id,
+        text: ticketText,
+        messageType: "system",
+      }).select("_id");
+
+      if (!existingTicketMessage) {
+        await Message.create({
+          conversationId: conversation._id,
+          orderId: null,
+          senderId: adminId,
+          receiverId: supportUser._id,
+          text: ticketText,
+          messageType: "system",
+        });
+
+        conversation.lastMessage = `Support ticket: ${supportMessage.subject}`;
+        conversation.lastMessageAt = new Date();
+        await conversation.save({ validateBeforeSave: false });
+      }
+
+      supportMessage.conversationId = conversation._id;
+    }
+
+    await supportMessage.save({ validateBeforeSave: false });
+
+    const [hydratedConversation, messages] = await Promise.all([
+      hydrateConversation(conversation._id),
+      Message.find({ conversationId: conversation._id, hiddenFor: { $ne: adminId } })
+        .populate("senderId", "_id firstName lastName avatar role")
+        .populate("receiverId", "_id firstName lastName avatar role")
+        .sort({ createdAt: 1 })
+        .limit(100)
+        .lean(),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      message: "Support conversation prepared successfully.",
+      data: {
+        supportMessage: normalizeSupportMessage({
+          ...supportMessage.toObject(),
+          userId: supportUser,
+        }),
+        conversation: normalizeConversation(hydratedConversation, adminId),
+        messages: messages.map(normalizeChatMessage),
+      },
     });
   } catch (error) {
     return next(error);
@@ -77,6 +289,13 @@ const updateSupportMessageStatus = async (req, res, next) => {
   try {
     const { id } = req.params;
     const nextStatus = String(req.body.status || "").trim().toLowerCase();
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid support message id.",
+      });
+    }
 
     if (!["solved", "ignored"].includes(nextStatus)) {
       return res.status(400).json({
@@ -111,5 +330,6 @@ const updateSupportMessageStatus = async (req, res, next) => {
 module.exports = {
   createSupportMessage,
   listSupportMessages,
+  startSupportConversation,
   updateSupportMessageStatus,
 };

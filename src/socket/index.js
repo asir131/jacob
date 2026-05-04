@@ -3,9 +3,24 @@ const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
 const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
+const User = require("../models/User");
 
 let ioInstance = null;
 const connectedUserCounts = new Map();
+
+const resolveCorsOrigins = () => {
+  const configuredOrigins =
+    process.env.SOCKET_CORS_ORIGIN ||
+    process.env.CORS_ORIGIN ||
+    "http://localhost:3000,http://localhost:3001";
+
+  const origins = configuredOrigins
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  return origins.length > 1 ? origins : origins[0];
+};
 
 const resolveToken = (socket) => {
   const authToken = socket.handshake.auth?.token;
@@ -21,7 +36,7 @@ const initSocket = (httpServer) => {
 
   ioInstance = new Server(httpServer, {
     cors: {
-      origin: process.env.SOCKET_CORS_ORIGIN || process.env.CORS_ORIGIN || "http://localhost:3000",
+      origin: resolveCorsOrigins(),
       credentials: true,
     },
   });
@@ -56,6 +71,48 @@ const initSocket = (httpServer) => {
         senderId: socket.data.userId,
         senderRole: socket.data.role,
       });
+    };
+
+    const emitCallBlocked = (payload = {}) => {
+      socket.emit("call:blocked", {
+        conversationId: payload.conversationId || "",
+        reason: "Audio and video calls are not available with admin support.",
+      });
+    };
+
+    const isAdminCallAttempt = async (payload = {}) => {
+      try {
+        if (socket.data.role === "superAdmin") return true;
+
+        const participantIds = new Set();
+        const targetUserId = String(payload.targetUserId || "");
+        const conversationId = String(payload.conversationId || "");
+
+        if (mongoose.Types.ObjectId.isValid(targetUserId)) {
+          participantIds.add(targetUserId);
+        }
+
+        if (mongoose.Types.ObjectId.isValid(conversationId)) {
+          const conversation = await Conversation.findById(conversationId)
+            .select("participants")
+            .lean();
+          const conversationParticipantIds = Array.isArray(conversation?.participants)
+            ? conversation.participants.map((id) => String(id))
+            : [];
+          conversationParticipantIds.forEach((id) => participantIds.add(id));
+        }
+
+        if (participantIds.size === 0) return false;
+
+        const adminUser = await User.exists({
+          _id: { $in: Array.from(participantIds) },
+          role: "superAdmin",
+        });
+        return Boolean(adminUser);
+      } catch (error) {
+        console.error("Failed to verify call participants:", error);
+        return true;
+      }
     };
 
     const persistCallHistory = async (payload = {}) => {
@@ -127,11 +184,19 @@ const initSocket = (httpServer) => {
     };
 
     socket.on("call:invite", async (payload = {}) => {
+      if (await isAdminCallAttempt(payload)) {
+        emitCallBlocked(payload);
+        return;
+      }
       await persistCallHistory(payload);
       relayCallEvent("call:invite", payload.targetUserId, payload);
     });
 
-    socket.on("call:signal", (payload = {}) => {
+    socket.on("call:signal", async (payload = {}) => {
+      if (await isAdminCallAttempt(payload)) {
+        emitCallBlocked(payload);
+        return;
+      }
       relayCallEvent("call:signal", payload.targetUserId, payload);
     });
 
