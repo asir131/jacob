@@ -9,7 +9,10 @@ const userSchema = new mongoose.Schema(
     },
     lastName: {
       type: String,
-      required: true,
+      required: function () {
+        return !["admin", "superAdmin"].includes(this.role);
+      },
+      default: "",
       trim: true,
     },
     email: {
@@ -37,7 +40,7 @@ const userSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ["client", "provider", "superAdmin"],
+      enum: ["client", "provider", "admin", "superAdmin"],
       required: true,
     },
     avatar: {

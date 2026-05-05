@@ -808,6 +808,153 @@ const getProviderDashboard = async (req, res, next) => {
   }
 };
 
+const getProviderRevenueHistory = async (req, res, next) => {
+  try {
+    if (!req.user || !["provider", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only providers can view revenue history.",
+      });
+    }
+
+    const page = parsePage(req.query.page, 1);
+    const limit = Math.min(20, parsePage(req.query.limit, 8));
+    const skip = (page - 1) * limit;
+    const query = {
+      providerId: req.user.id,
+      status: "completed",
+      paymentStatus: "paid",
+    };
+
+    const [orders, totalItems, totals] = await Promise.all([
+      Order.find(query)
+        .populate("gigId", "_id title categoryName images")
+        .populate("clientId", "_id firstName lastName email phone address avatar locationLat locationLng")
+        .populate("providerId", "_id firstName lastName email phone address avatar")
+        .sort({ paidAt: -1, completedAt: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Order.countDocuments(query),
+      Order.aggregate([
+        { $match: { providerId: new mongoose.Types.ObjectId(String(req.user.id)), status: "completed", paymentStatus: "paid" } },
+        {
+          $group: {
+            _id: null,
+            totalEarnings: { $sum: "$providerEarningsAmount" },
+            totalPaid: { $sum: "$paymentAmount" },
+            totalPlatformFees: { $sum: "$platformFeeAmount" },
+          },
+        },
+      ]),
+    ]);
+
+    const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+    const safePage = Math.min(page, totalPages);
+    const summary = totals[0] || {};
+
+    return res.status(200).json({
+      success: true,
+      message: "Provider revenue history fetched successfully.",
+      data: {
+        items: orders.map(buildOrderSummary),
+        summary: {
+          totalEarnings: roundMoney(summary.totalEarnings || 0),
+          totalPaid: roundMoney(summary.totalPaid || 0),
+          totalPlatformFees: roundMoney(summary.totalPlatformFees || 0),
+          paidOrders: totalItems,
+        },
+        pagination: {
+          page: safePage,
+          limit,
+          totalItems,
+          totalPages,
+          hasNextPage: safePage < totalPages,
+          hasPrevPage: safePage > 1,
+        },
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const getProviderRatings = async (req, res, next) => {
+  try {
+    if (!req.user || !["provider", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only providers can view ratings.",
+      });
+    }
+
+    const page = parsePage(req.query.page, 1);
+    const limit = Math.min(20, parsePage(req.query.limit, 8));
+    const skip = (page - 1) * limit;
+    const query = {
+      providerId: req.user.id,
+      status: "completed",
+      paymentStatus: "paid",
+      clientRating: { $ne: null },
+    };
+
+    const [orders, totalItems, stats] = await Promise.all([
+      Order.find(query)
+        .populate("gigId", "_id title categoryName images")
+        .populate("clientId", "_id firstName lastName email phone address avatar locationLat locationLng")
+        .populate("providerId", "_id firstName lastName email phone address avatar")
+        .sort({ completedAt: -1, paidAt: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Order.countDocuments(query),
+      Order.aggregate([
+        {
+          $match: {
+            providerId: new mongoose.Types.ObjectId(String(req.user.id)),
+            status: "completed",
+            paymentStatus: "paid",
+            clientRating: { $ne: null },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            averageRating: { $avg: "$clientRating" },
+            reviewCount: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+    const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+    const safePage = Math.min(page, totalPages);
+    const summary = stats[0] || {};
+
+    return res.status(200).json({
+      success: true,
+      message: "Provider ratings fetched successfully.",
+      data: {
+        items: orders.map(buildOrderSummary),
+        summary: {
+          averageRating: Number((Number(summary.averageRating) || 0).toFixed(1)),
+          reviewCount: Number(summary.reviewCount || 0),
+        },
+        pagination: {
+          page: safePage,
+          limit,
+          totalItems,
+          totalPages,
+          hasNextPage: safePage < totalPages,
+          hasPrevPage: safePage > 1,
+        },
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 const getClientDashboard = async (req, res, next) => {
   try {
     if (!req.user || !["client", "superAdmin"].includes(req.user.role)) {
@@ -1410,7 +1557,18 @@ const listProviderOrders = async (req, res, next) => {
     };
 
       if (status && status !== "all") {
-        if (status === "request_revision") {
+        if (status === "active") {
+          query.status = {
+            $in: [
+              "accepted",
+              "accepting_delivery",
+              "revision_requested",
+              "under_revision",
+              "after_sell_revision_requested",
+              "under_after_sell_revision",
+            ],
+          };
+        } else if (status === "request_revision") {
           query.status = { $in: ["revision_requested", "after_sell_revision_requested"] };
         } else if (status === "under_revision") {
           query.status = { $in: ["under_revision", "under_after_sell_revision"] };
@@ -1482,7 +1640,19 @@ const listClientOrders = async (req, res, next) => {
     };
 
       if (status && status !== "all") {
-        if (status === "payment_pending") {
+        if (status === "active") {
+          query.status = {
+            $in: [
+              "pending",
+              "accepted",
+              "accepting_delivery",
+              "revision_requested",
+              "under_revision",
+              "after_sell_revision_requested",
+              "under_after_sell_revision",
+            ],
+          };
+        } else if (status === "payment_pending") {
           query.status = "accepting_delivery";
         } else if (status === "cancelled") {
           query.status = "declined";
@@ -2597,6 +2767,8 @@ module.exports = {
   getAdminOrderDetail,
   listProviderOrders,
   getProviderDashboard,
+  getProviderRevenueHistory,
+  getProviderRatings,
   getClientDashboard,
   listClientOrders,
   getProviderOrderDetail,

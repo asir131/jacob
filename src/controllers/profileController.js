@@ -132,6 +132,45 @@ const formatAdminLocation = (userDoc = {}) => {
   return "Location unavailable";
 };
 
+const splitAdminName = (name = "") => {
+  const cleanName = String(name || "").trim().replace(/\s+/g, " ");
+  const parts = cleanName.split(" ").filter(Boolean);
+  if (parts.length <= 1) {
+    return {
+      firstName: parts[0] || "Admin",
+      lastName: "",
+    };
+  }
+
+  return {
+    firstName: parts.slice(0, -1).join(" "),
+    lastName: parts[parts.length - 1],
+  };
+};
+
+const serializeAdminAccount = (userDoc = {}) => ({
+  id: String(userDoc._id || ""),
+  name: `${userDoc.firstName || ""} ${userDoc.lastName || ""}`.trim() || userDoc.email || "Admin",
+  firstName: userDoc.firstName || "",
+  lastName: userDoc.lastName || "",
+  email: userDoc.email || "",
+  avatar: userDoc.avatar || "",
+  role: userDoc.role || "admin",
+  createdAt: userDoc.createdAt || null,
+  updatedAt: userDoc.updatedAt || null,
+});
+
+const normalizeAdminEmailName = (name = "") => {
+  const normalized = String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/@admin\.com$/i, "")
+    .replace(/[^a-z0-9]+/g, ".")
+    .replace(/^\.+|\.+$/g, "");
+
+  return normalized || "admin";
+};
+
 const getPublicProviderProfile = async (req, res, next) => {
   try {
     const { providerId } = req.params;
@@ -1242,6 +1281,176 @@ const rejectProviderVerification = async (req, res, next) => {
   }
 };
 
+const createAdminAccount = async (req, res, next) => {
+  try {
+    if (!req.user || req.user.role !== "superAdmin") {
+      return res.status(403).json({
+        success: false,
+        message: "Only super admin can create admin accounts.",
+      });
+    }
+
+    const name = String(req.body.name || "").trim();
+    const password = String(req.body.password || "");
+    if (!name) {
+      return res.status(400).json({
+        success: false,
+        message: "Admin name is required.",
+      });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 8 characters.",
+      });
+    }
+
+    const email = `${normalizeAdminEmailName(name)}@admin.com`;
+    const existingAdmin = await User.findOne({ email });
+    if (existingAdmin) {
+      return res.status(409).json({
+        success: false,
+        message: "An admin with this generated email already exists.",
+      });
+    }
+
+    const { firstName, lastName } = splitAdminName(name);
+    const admin = await User.create({
+      firstName,
+      lastName,
+      email,
+      password: await bcrypt.hash(password, 10),
+      role: "admin",
+      isVerified: true,
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Admin account created successfully.",
+      data: {
+        admin: serializeAdminAccount(admin),
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const listAdminAccounts = async (req, res, next) => {
+  try {
+    if (!req.user || req.user.role !== "superAdmin") {
+      return res.status(403).json({
+        success: false,
+        message: "Only super admin can view admin accounts.",
+      });
+    }
+
+    const page = Math.max(1, Math.floor(Number(req.query.page) || 1));
+    const limit = Math.min(20, Math.max(1, Math.floor(Number(req.query.limit) || 8)));
+    const skip = (page - 1) * limit;
+    const query = { role: "admin" };
+
+    const [admins, totalItems] = await Promise.all([
+      User.find(query)
+        .select("_id firstName lastName email avatar role createdAt updatedAt")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      User.countDocuments(query),
+    ]);
+
+    const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+    const safePage = Math.min(page, totalPages);
+
+    return res.status(200).json({
+      success: true,
+      message: "Admin accounts fetched successfully.",
+      data: {
+        items: admins.map(serializeAdminAccount),
+        pagination: {
+          page: safePage,
+          limit,
+          totalItems,
+          totalPages,
+          hasNextPage: safePage < totalPages,
+          hasPrevPage: safePage > 1,
+        },
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const updateAdminAccount = async (req, res, next) => {
+  try {
+    if (!req.user || req.user.role !== "superAdmin") {
+      return res.status(403).json({
+        success: false,
+        message: "Only super admin can update admin accounts.",
+      });
+    }
+
+    const { adminId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(adminId)) {
+      return res.status(404).json({
+        success: false,
+        message: "Admin account not found.",
+      });
+    }
+
+    const admin = await User.findOne({ _id: adminId, role: "admin" });
+    if (!admin) {
+      return res.status(404).json({
+        success: false,
+        message: "Admin account not found.",
+      });
+    }
+
+    const name = String(req.body.name || "").trim();
+    const newPassword = String(req.body.newPassword || "");
+    const confirmPassword = String(req.body.confirmPassword || "");
+
+    if (name) {
+      const { firstName, lastName } = splitAdminName(name);
+      admin.firstName = firstName;
+      admin.lastName = lastName;
+    }
+
+    if (newPassword || confirmPassword) {
+      if (newPassword.length < 8) {
+        return res.status(400).json({
+          success: false,
+          message: "New password must be at least 8 characters.",
+        });
+      }
+
+      if (newPassword !== confirmPassword) {
+        return res.status(400).json({
+          success: false,
+          message: "New password and confirm password do not match.",
+        });
+      }
+
+      admin.password = await bcrypt.hash(newPassword, 10);
+    }
+
+    await admin.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Admin account updated successfully.",
+      data: {
+        admin: serializeAdminAccount(admin),
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 const changePassword = async (req, res, next) => {
   try {
     const { currentPassword, newPassword } = req.body;
@@ -1306,6 +1515,9 @@ module.exports = {
   uploadAvatar,
   updateProfile,
   changePassword,
+  createAdminAccount,
+  listAdminAccounts,
+  updateAdminAccount,
   saveService,
   removeSavedService,
   getMySavedServices,

@@ -2,6 +2,7 @@ const express = require("express");
 const multer = require("multer");
 const requireAuth = require("../middlewares/requireAuth");
 const requireAdmin = require("../middlewares/requireAdmin");
+const requireSuperAdmin = require("../middlewares/requireSuperAdmin");
 const {
   getMyProfile,
   getPublicProviderProfile,
@@ -12,6 +13,9 @@ const {
   uploadAvatar,
   updateProfile,
   changePassword,
+  createAdminAccount,
+  listAdminAccounts,
+  updateAdminAccount,
   saveService,
   removeSavedService,
   getMySavedServices,
@@ -40,6 +44,9 @@ router.get("/admin/customers", requireAuth, requireAdmin, listAdminCustomers);
 router.get("/admin/customers/:customerId", requireAuth, requireAdmin, getAdminCustomerDetails);
 router.get("/admin/providers", requireAuth, requireAdmin, listAdminProviders);
 router.get("/admin/providers/:providerId", requireAuth, requireAdmin, getAdminProviderDetails);
+router.get("/admin/admins", requireAuth, requireSuperAdmin, listAdminAccounts);
+router.post("/admin/admins", requireAuth, requireSuperAdmin, createAdminAccount);
+router.patch("/admin/admins/:adminId", requireAuth, requireSuperAdmin, updateAdminAccount);
 router.post("/avatar", requireAuth, upload.single("image"), uploadAvatar);
 router.put("/me", requireAuth, updateProfile);
 router.post("/change-password", requireAuth, changePassword);

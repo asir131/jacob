@@ -139,6 +139,18 @@ const orderSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    providerDayBeforeReminderSentAt: {
+      type: Date,
+      default: null,
+    },
+    providerMorningReminderSentAt: {
+      type: Date,
+      default: null,
+    },
+    client24HourReminderSentAt: {
+      type: Date,
+      default: null,
+    },
     paymentStatus: {
       type: String,
       enum: ["unpaid", "pending", "paid", "failed"],

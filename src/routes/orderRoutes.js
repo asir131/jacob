@@ -7,6 +7,8 @@ const {
   getAdminDashboard,
   getAdminOrderDetail,
   getProviderDashboard,
+  getProviderRevenueHistory,
+  getProviderRatings,
   getClientDashboard,
   listProviderOrders,
   listClientOrders,
@@ -37,6 +39,8 @@ router.get("/admin/dashboard", requireAuth, requireAdmin, getAdminDashboard);
 router.get("/admin/orders/:id", requireAuth, requireAdmin, getAdminOrderDetail);
 router.get("/admin/transactions", requireAuth, requireAdmin, getAdminTransactions);
 router.get("/provider/dashboard", requireAuth, getProviderDashboard);
+router.get("/provider/revenue", requireAuth, getProviderRevenueHistory);
+router.get("/provider/ratings", requireAuth, getProviderRatings);
 router.get("/provider", requireAuth, listProviderOrders);
 router.get("/provider/:id", requireAuth, getProviderOrderDetail);
 router.get("/client/dashboard", requireAuth, getClientDashboard);

@@ -20,7 +20,7 @@ const requireAuth = (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     User.findById(decoded.userId)
-      .select("_id role email firstName lastName")
+      .select("_id role email firstName lastName avatar")
       .then((user) => {
         if (!user) {
           return res.status(401).json({
@@ -35,6 +35,7 @@ const requireAuth = (req, res, next) => {
           email: user.email,
           firstName: user.firstName || "",
           lastName: user.lastName || "",
+          avatar: user.avatar || "",
         };
 
         return next();

@@ -920,8 +920,8 @@ const calculateDistanceKm = (fromLat, fromLng, toLat, toLng) => {
   return Number((earthRadiusKm * c).toFixed(1));
 };
 
-const fillDailySeries = (rows = [], totalDays = 14) => {
-  const byDate = new Map(rows.map((row) => [row._id, Number(row.count) || 0]));
+const fillDailySeries = (rows = [], totalDays = 14, valueKey = "count") => {
+  const byDate = new Map(rows.map((row) => [row._id, Number(row[valueKey]) || 0]));
   const series = [];
 
   for (let offset = totalDays - 1; offset >= 0; offset -= 1) {
@@ -932,7 +932,7 @@ const fillDailySeries = (rows = [], totalDays = 14) => {
     series.push({
       date: key,
       label: current.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
-      count: byDate.get(key) || 0,
+      [valueKey]: byDate.get(key) || 0,
     });
   }
 
@@ -1365,28 +1365,38 @@ const getGigAnalytics = async (req, res, next) => {
       });
     }
 
-    const [servicesPageVisibleClients, detailPageUniqueClients, detailViewRows] = await Promise.all([
-      GigAnalyticsEvent.countDocuments({
-        gigId: gig._id,
-        eventType: "services_impression",
-      }),
-      GigAnalyticsEvent.countDocuments({
-        gigId: gig._id,
-        eventType: "service_detail_view",
-      }),
-      GigAnalyticsEvent.aggregate([
+    const incomeWindowStart = (() => {
+      const date = new Date();
+      date.setHours(0, 0, 0, 0);
+      date.setDate(date.getDate() - 29);
+      return date;
+    })();
+
+    const [incomeSummaryRows, earningsRows] = await Promise.all([
+      Order.aggregate([
         {
           $match: {
             gigId: gig._id,
-            eventType: "service_detail_view",
-            firstSeenAt: {
-              $gte: (() => {
-                const date = new Date();
-                date.setHours(0, 0, 0, 0);
-                date.setDate(date.getDate() - 13);
-                return date;
-              })(),
-            },
+            status: "completed",
+            paymentStatus: "paid",
+            paidAt: { $gte: incomeWindowStart },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            totalIncome: { $sum: "$providerEarningsAmount" },
+            totalOrders: { $sum: 1 },
+          },
+        },
+      ]),
+      Order.aggregate([
+        {
+          $match: {
+            gigId: gig._id,
+            status: "completed",
+            paymentStatus: "paid",
+            paidAt: { $gte: incomeWindowStart },
           },
         },
         {
@@ -1394,15 +1404,17 @@ const getGigAnalytics = async (req, res, next) => {
             _id: {
               $dateToString: {
                 format: "%Y-%m-%d",
-                date: "$firstSeenAt",
+                date: "$paidAt",
               },
             },
-            count: { $sum: 1 },
+            earnings: { $sum: "$providerEarningsAmount" },
           },
         },
         { $sort: { _id: 1 } },
       ]),
     ]);
+
+    const incomeSummary = incomeSummaryRows[0] || { totalIncome: 0, totalOrders: 0 };
 
     return res.status(200).json({
       success: true,
@@ -1414,10 +1426,11 @@ const getGigAnalytics = async (req, res, next) => {
           status: gig.status || "draft",
         },
         summary: {
-          servicesPageVisibleClients,
-          detailPageUniqueClients,
+          totalIncome: roundMoney(incomeSummary.totalIncome || 0),
+          completedPaidOrders: Number(incomeSummary.totalOrders || 0),
+          periodDays: 30,
         },
-        detailViewSeries: fillDailySeries(detailViewRows, 14),
+        detailViewSeries: fillDailySeries(earningsRows, 30, "earnings"),
       },
     });
   } catch (error) {
