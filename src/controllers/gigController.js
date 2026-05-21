@@ -12,7 +12,7 @@ const { emitToRole, emitToUser } = require("../socket");
 const DEFAULT_CATEGORY_ICON = "ShieldCheck";
 const DEFAULT_PACKAGE_NAMES = ["Basic", "Standard", "Premium"];
 const MAX_GIG_IMAGES = 4;
-const ADMIN_FEE_RATE = 0.1;
+const ADMIN_FEE_RATE = 0.15;
 
 const isCustomCategorySlug = (categorySlug = "", customCategoryName = "") => {
   return categorySlug === "create-your-own-category" || Boolean(String(customCategoryName).trim());
@@ -50,7 +50,7 @@ const normalizePackages = (packages = []) => {
 
 const roundMoney = (value) => Number((Number(value) || 0).toFixed(2));
 const calculateAdminFeeAmount = (baseAmount) => roundMoney((Number(baseAmount) || 0) * ADMIN_FEE_RATE);
-const calculateClientPrice = (baseAmount) => roundMoney((Number(baseAmount) || 0) + calculateAdminFeeAmount(baseAmount));
+const calculateClientPrice = (baseAmount) => roundMoney(Number(baseAmount) || 0);
 
 const normalizeImages = (images = []) => {
   if (!Array.isArray(images)) return [];

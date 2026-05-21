@@ -53,6 +53,23 @@ const createOrderNumber = () => {
   return `ORD-${Date.now()}-${random}`;
 };
 
+const roundMoney = (value) => Number((Number(value) || 0).toFixed(2));
+const calculateOrderPricing = (listedPrice) => {
+  const gross = roundMoney(listedPrice);
+  const adminFee = roundMoney(gross * 0.15);
+  const providerNet = roundMoney(Math.max(gross - adminFee, 0));
+  return {
+    packagePrice: gross,
+    paymentAmount: gross,
+    platformFeeAmount: adminFee,
+    providerEarningsAmount: providerNet,
+    listedPrice: gross,
+    customerPaidAmount: gross,
+    adminFeeAmount: adminFee,
+    providerNetAmount: providerNet,
+  };
+};
+
 const createNotificationId = (suffix = "") => `NTF-${Date.now()}${suffix ? `-${suffix}` : ""}`;
 const extractZipCodeFromText = (value = "") => {
   const match = String(value || "").match(/\b\d{5}(?:-\d{4})?\b/);
@@ -235,6 +252,7 @@ const createOrderFromServiceRequest = async ({ request, providerId }) => {
     (await resolveAddressFromCoordinates(clientProfile?.locationLat, clientProfile?.locationLng)) ||
     "";
 
+  const pricing = calculateOrderPricing(request.budget);
   const order = await Order.create({
     orderNumber: createOrderNumber(),
     gigId: null,
@@ -244,7 +262,7 @@ const createOrderFromServiceRequest = async ({ request, providerId }) => {
     packageName: String(request.categorySlug || "custom-request").trim(),
     packageTitle: String(request.categoryName || request.categorySlug || "Custom Request").trim(),
     categoryName: String(request.categoryName || request.categorySlug || "Custom Request").trim(),
-    packagePrice: Number(request.budget) || 0,
+    ...pricing,
     scheduledDate: request.preferredDate ? new Date(request.preferredDate) : new Date(),
     scheduledTime: String(request.preferredTime || "").trim(),
     serviceAddress: String(request.serviceAddress || "").trim(),
@@ -254,7 +272,6 @@ const createOrderFromServiceRequest = async ({ request, providerId }) => {
     status: "accepted",
     paymentStatus: "unpaid",
     paymentProvider: "stripe",
-    paymentAmount: Number(request.budget) || 0,
     paymentCurrency: "usd",
   });
 

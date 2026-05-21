@@ -14,7 +14,7 @@ const PAYOUT_STATUS = {
 };
 
 const roundMoney = (value) => Number((Number(value) || 0).toFixed(2));
-const calculateClientPrice = (baseAmount) => roundMoney((Number(baseAmount) || 0) * 1.1);
+const calculateClientPrice = (baseAmount) => roundMoney(Number(baseAmount) || 0);
 
 const serializeUser = (userDoc) => {
   return {

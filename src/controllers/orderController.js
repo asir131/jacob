@@ -14,7 +14,7 @@ const WithdrawalRequest = require("../models/WithdrawalRequest");
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
 const WEB_APP_URL = process.env.CLIENT_APP_URL || process.env.FRONTEND_URL || "http://localhost:3000";
 const MOBILE_APP_URL = process.env.MOBILE_APP_URL || "jaco://booking-details";
-const ADMIN_FEE_RATE = 0.1;
+const ADMIN_FEE_RATE = 0.15;
 
 const buildClientCheckoutRedirectUrl = (baseUrl, params = {}) => {
   const searchParams = new URLSearchParams();
@@ -169,17 +169,33 @@ const normalizePoint = (lat, lng) => {
 
 const roundMoney = (value) => Number((Number(value) || 0).toFixed(2));
 const calculateAdminFeeAmount = (baseAmount) => roundMoney((Number(baseAmount) || 0) * ADMIN_FEE_RATE);
-const calculateClientPaymentAmount = (baseAmount) =>
-  roundMoney((Number(baseAmount) || 0) + calculateAdminFeeAmount(baseAmount));
+const calculateProviderNetAmount = (baseAmount) =>
+  roundMoney(Math.max((Number(baseAmount) || 0) - calculateAdminFeeAmount(baseAmount), 0));
+const calculateClientPaymentAmount = (baseAmount) => roundMoney(Number(baseAmount) || 0);
 const buildPackagePricing = (baseAmount) => {
   const normalizedBaseAmount = roundMoney(baseAmount);
   const adminFeeAmount = calculateAdminFeeAmount(normalizedBaseAmount);
+  const providerNetAmount = calculateProviderNetAmount(normalizedBaseAmount);
 
   return {
     baseAmount: normalizedBaseAmount,
     adminFeeAmount,
+    providerNetAmount,
     clientPaymentAmount: calculateClientPaymentAmount(normalizedBaseAmount),
   };
+};
+
+const applyPaymentBreakdown = (target, pricing) => {
+  if (!target || !pricing) return target;
+  target.packagePrice = pricing.baseAmount;
+  target.paymentAmount = pricing.clientPaymentAmount;
+  target.platformFeeAmount = pricing.adminFeeAmount;
+  target.providerEarningsAmount = pricing.providerNetAmount;
+  target.listedPrice = pricing.baseAmount;
+  target.customerPaidAmount = pricing.clientPaymentAmount;
+  target.adminFeeAmount = pricing.adminFeeAmount;
+  target.providerNetAmount = pricing.providerNetAmount;
+  return target;
 };
 
 const resolveRepeatRootId = (order) => {
@@ -280,8 +296,24 @@ const buildOrderSummary = (order) => {
     paymentProvider: order.paymentProvider || "stripe",
     paymentCurrency: order.paymentCurrency || "usd",
     paymentAmount: Number(order.paymentAmount) || Number(order.packagePrice) || 0,
-    platformFeeAmount: Number(order.platformFeeAmount) || 0,
-    providerEarningsAmount: Number(order.providerEarningsAmount) || Number(order.packagePrice) || 0,
+    platformFeeAmount:
+      Number(order.platformFeeAmount) ||
+      Number(order.adminFeeAmount) ||
+      (order.paymentStatus === "paid" ? 0 : calculateAdminFeeAmount(order.packagePrice)),
+    providerEarningsAmount:
+      Number(order.providerEarningsAmount) ||
+      Number(order.providerNetAmount) ||
+      (order.paymentStatus === "paid" ? Number(order.packagePrice) || 0 : calculateProviderNetAmount(order.packagePrice)),
+    listedPrice: Number(order.listedPrice) || Number(order.packagePrice) || 0,
+    customerPaidAmount: Number(order.customerPaidAmount) || Number(order.paymentAmount) || Number(order.packagePrice) || 0,
+    adminFeeAmount:
+      Number(order.adminFeeAmount) ||
+      Number(order.platformFeeAmount) ||
+      (order.paymentStatus === "paid" ? 0 : calculateAdminFeeAmount(order.packagePrice)),
+    providerNetAmount:
+      Number(order.providerNetAmount) ||
+      Number(order.providerEarningsAmount) ||
+      (order.paymentStatus === "paid" ? Number(order.packagePrice) || 0 : calculateProviderNetAmount(order.packagePrice)),
     paidAt: order.paidAt || null,
     isRequestedOrder: !gig._id || !gig.title,
     canRequestRepeatOrder: order.status === "completed",
@@ -1246,19 +1278,16 @@ const finalizePaidOrder = async ({ order, session, clientRating = null, clientRe
   if (!order) return null;
 
   const alreadyPaid = order.paymentStatus === "paid" && order.status === "completed";
-  const baseAmount = roundMoney(order.packagePrice);
-  const platformFeeAmount =
-    Number(order.platformFeeAmount) > 0
-      ? roundMoney(order.platformFeeAmount)
-      : calculateAdminFeeAmount(baseAmount);
-  const providerEarningsAmount =
-    Number(order.providerEarningsAmount) > 0
-      ? roundMoney(order.providerEarningsAmount)
-      : baseAmount;
-  const paymentAmount =
-    Number(order.paymentAmount) > 0
-      ? roundMoney(order.paymentAmount)
-      : roundMoney(providerEarningsAmount + platformFeeAmount);
+  const pricing = alreadyPaid
+    ? {
+        baseAmount: roundMoney(order.listedPrice || order.packagePrice),
+        adminFeeAmount: roundMoney(order.adminFeeAmount || order.platformFeeAmount),
+        providerNetAmount: roundMoney(order.providerNetAmount || order.providerEarningsAmount),
+        clientPaymentAmount: roundMoney(order.customerPaidAmount || order.paymentAmount || order.packagePrice),
+      }
+    : buildPackagePricing(order.packagePrice);
+  const platformFeeAmount = pricing.adminFeeAmount;
+  const providerEarningsAmount = pricing.providerNetAmount;
 
   if (!alreadyPaid) {
     order.paymentStatus = "paid";
@@ -1266,9 +1295,7 @@ const finalizePaidOrder = async ({ order, session, clientRating = null, clientRe
     order.stripeCheckoutSessionId = session?.id || order.stripeCheckoutSessionId || "";
     order.stripePaymentIntentId = String(session?.payment_intent?.id || session?.payment_intent || order.stripePaymentIntentId || "");
     order.paymentCurrency = String(session?.currency || order.paymentCurrency || "usd");
-    order.paymentAmount = paymentAmount;
-    order.platformFeeAmount = platformFeeAmount;
-    order.providerEarningsAmount = providerEarningsAmount;
+    applyPaymentBreakdown(order, pricing);
     order.paidAt = new Date();
     order.status = "completed";
     order.completedAt = new Date();
@@ -1292,7 +1319,7 @@ const finalizePaidOrder = async ({ order, session, clientRating = null, clientRe
       id: `NTF-${Date.now()}`,
       type: "success",
       title: "Payment received",
-      description: `Client paid for ${order.gigId?.title || "your order"}. Your full package earnings have been credited.`,
+      description: `Client paid for ${order.gigId?.title || "your order"}. Your net earnings have been credited.`,
       data: {
         notificationType: "order_paid",
         orderId: order._id.toString(),
@@ -1482,7 +1509,7 @@ const createOrder = async (req, res, next) => {
       }
     }
 
-    const order = await Order.create({
+    const orderPayload = {
       orderNumber: createOrderNumber(),
       gigId: gig._id,
       clientId: req.user.id,
@@ -1490,7 +1517,6 @@ const createOrder = async (req, res, next) => {
       packageName: String(packageName).trim(),
       packageTitle: String(selectedGigPackage?.title || packageTitle || packageName).trim(),
       categoryName: String(gig.categoryName || "").trim(),
-      packagePrice: pricing.baseAmount,
       scheduledDate: new Date(scheduledDate),
       scheduledTime: String(scheduledTime).trim(),
       serviceAddress: String(serviceAddress).trim(),
@@ -1500,11 +1526,10 @@ const createOrder = async (req, res, next) => {
       status: "pending",
       paymentStatus: "unpaid",
       paymentProvider: "stripe",
-      paymentAmount: pricing.clientPaymentAmount,
-      platformFeeAmount: pricing.adminFeeAmount,
-      providerEarningsAmount: pricing.baseAmount,
       paymentCurrency: "usd",
-    });
+    };
+    applyPaymentBreakdown(orderPayload, pricing);
+    const order = await Order.create(orderPayload);
 
     emitToUser(String(gig.providerId), "notification:new", {
       id: `NTF-${Date.now()}`,
@@ -2377,7 +2402,8 @@ const createClientCheckoutSession = async (req, res, next) => {
       });
     }
 
-    const amount = Math.max(Number(order.paymentAmount) || Number(order.packagePrice) || 0, 0);
+    const pricing = buildPackagePricing(order.packagePrice);
+    const amount = Math.max(pricing.clientPaymentAmount, 0);
     if (amount <= 0) {
       return res.status(400).json({
         success: false,
@@ -2416,8 +2442,8 @@ const createClientCheckoutSession = async (req, res, next) => {
 
     order.paymentStatus = "pending";
     order.stripeCheckoutSessionId = session.id || "";
-    order.paymentAmount = amount;
     order.paymentCurrency = "usd";
+    applyPaymentBreakdown(order, pricing);
     await order.save({ validateBeforeSave: false });
 
     return res.status(200).json({

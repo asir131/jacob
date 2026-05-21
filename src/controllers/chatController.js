@@ -49,6 +49,23 @@ const createOrderNumber = () => {
   return `ORD-${Date.now()}-${random}`;
 };
 
+const roundMoney = (value) => Number((Number(value) || 0).toFixed(2));
+const calculateOrderPricing = (listedPrice) => {
+  const gross = roundMoney(listedPrice);
+  const adminFee = roundMoney(gross * 0.15);
+  const providerNet = roundMoney(Math.max(gross - adminFee, 0));
+  return {
+    packagePrice: gross,
+    paymentAmount: gross,
+    platformFeeAmount: adminFee,
+    providerEarningsAmount: providerNet,
+    listedPrice: gross,
+    customerPaidAmount: gross,
+    adminFeeAmount: adminFee,
+    providerNetAmount: providerNet,
+  };
+};
+
 const resolveRepeatRootId = (order) => {
   if (!order) return null;
   return order.repeatRootOrderId?._id || order.repeatRootOrderId || order._id || null;
@@ -791,6 +808,7 @@ const respondToCustomOrderProposal = async (req, res, next) => {
     if (action === "accept") {
       const repeatRootOrderId = proposal.repeatRootOrderId || resolveRepeatRootId(sourceOrder);
       const repeatIteration = Number(proposal.repeatIteration) || (sourceOrder?.repeatIteration ? Number(sourceOrder.repeatIteration) + 1 : 2);
+      const pricing = calculateOrderPricing(proposal.price);
 
       createdOrder = await Order.create({
         orderNumber: createOrderNumber(),
@@ -804,7 +822,7 @@ const respondToCustomOrderProposal = async (req, res, next) => {
         packageName: isRepeatOrderProposal ? "repeat_order" : "custom_order",
         packageTitle: proposal.title,
         categoryName: gig?.categoryName || serviceRequest?.categoryName || "Custom Order",
-        packagePrice: Number(proposal.price) || 0,
+        ...pricing,
         scheduledDate: proposal.scheduledDate,
         scheduledTime: proposal.scheduledTime,
         serviceAddress: proposal.serviceAddress,
@@ -814,10 +832,7 @@ const respondToCustomOrderProposal = async (req, res, next) => {
         status: "accepted",
         paymentStatus: "unpaid",
         paymentProvider: "stripe",
-        paymentAmount: Number(proposal.price) || 0,
         paymentCurrency: "usd",
-        providerEarningsAmount: Number(proposal.price) || 0,
-        platformFeeAmount: 0,
       });
 
       if (!conversation.orderId) {

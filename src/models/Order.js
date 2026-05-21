@@ -188,6 +188,22 @@ const orderSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    listedPrice: {
+      type: Number,
+      default: 0,
+    },
+    customerPaidAmount: {
+      type: Number,
+      default: 0,
+    },
+    adminFeeAmount: {
+      type: Number,
+      default: 0,
+    },
+    providerNetAmount: {
+      type: Number,
+      default: 0,
+    },
     paidAt: {
       type: Date,
       default: null,
