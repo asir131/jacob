@@ -4,6 +4,7 @@ const requireAuth = require("../middlewares/requireAuth");
 const {
   getConversations,
   ensureConversationByOrder,
+  startProviderConversation,
   startCustomOrderConversation,
   startRepeatOrderConversation,
   getConversationMessages,
@@ -24,6 +25,7 @@ const upload = multer({
 
 router.get("/conversations", requireAuth, getConversations);
 router.post("/conversations/order/:orderId", requireAuth, ensureConversationByOrder);
+router.post("/conversations/provider/start", requireAuth, startProviderConversation);
 router.post("/conversations/custom-order/start", requireAuth, startCustomOrderConversation);
 router.post("/conversations/repeat-order/start", requireAuth, startRepeatOrderConversation);
 router.get("/conversations/:conversationId/messages", requireAuth, getConversationMessages);

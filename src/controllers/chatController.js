@@ -380,6 +380,71 @@ const startServiceRequestNegotiationConversation = async ({
   return conversation;
 };
 
+const startProviderConversation = async (req, res, next) => {
+  try {
+    if (!req.user?.id || !["client", "superAdmin"].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: "Only customers can contact professionals." });
+    }
+
+    const { providerId, gigId } = req.body || {};
+    if (!mongoose.Types.ObjectId.isValid(String(providerId || ""))) {
+      return res.status(400).json({ success: false, message: "Valid provider id is required." });
+    }
+    if (!mongoose.Types.ObjectId.isValid(String(gigId || ""))) {
+      return res.status(400).json({ success: false, message: "Valid gig id is required." });
+    }
+    if (String(providerId) === String(req.user.id)) {
+      return res.status(400).json({ success: false, message: "You cannot contact yourself." });
+    }
+
+    const [provider, gig] = await Promise.all([
+      User.findOne({ _id: providerId, role: "provider" }).select("_id firstName lastName"),
+      Gig.findOne({ _id: gigId, status: "published" }).select("_id title categoryName providerId"),
+    ]);
+
+    if (!provider) {
+      return res.status(404).json({ success: false, message: "Provider not found." });
+    }
+    if (!gig || String(gig.providerId) !== String(provider._id)) {
+      return res.status(404).json({ success: false, message: "Service not found for this provider." });
+    }
+
+    let conversation = await Conversation.findOne({
+      participants: { $all: [req.user.id, provider._id] },
+      $expr: { $eq: [{ $size: "$participants" }, 2] },
+    }).sort({ updatedAt: -1 });
+
+    if (!conversation) {
+      conversation = await Conversation.create({
+        orderId: null,
+        gigId: gig._id,
+        serviceRequestId: null,
+        participants: [req.user.id, provider._id],
+        blockedBy: null,
+        lastMessage: "",
+        lastMessageAt: null,
+      });
+    }
+
+    if (!conversation.gigId) {
+      conversation.gigId = gig._id;
+      await conversation.save({ validateBeforeSave: false });
+    }
+
+    const hydratedConversation = await hydrateConversation(conversation._id);
+
+    return res.status(200).json({
+      success: true,
+      message: "Conversation prepared successfully.",
+      data: {
+        conversation: normalizeConversation(hydratedConversation, req.user.id),
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 const startCustomOrderConversation = async (req, res, next) => {
   try {
     if (!req.user?.id || !["client", "superAdmin"].includes(req.user.role)) {
@@ -1403,6 +1468,7 @@ module.exports = {
   startServiceRequestNegotiationConversation,
   getConversations,
   ensureConversationByOrder,
+  startProviderConversation,
   startCustomOrderConversation,
   startRepeatOrderConversation,
   getConversationMessages,
