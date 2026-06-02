@@ -81,6 +81,12 @@ const gigRequestSchema = new mongoose.Schema(
           default: "",
           trim: true,
         },
+        deliveryTimeUnit: {
+          type: String,
+          enum: ["Hours", "Days", "Weeks", ""],
+          default: "Days",
+          trim: true,
+        },
         price: {
           type: Number,
           default: 0,
@@ -88,6 +94,12 @@ const gigRequestSchema = new mongoose.Schema(
       },
     ],
     images: [
+      {
+        type: String,
+        default: "",
+      },
+    ],
+    videos: [
       {
         type: String,
         default: "",

@@ -56,6 +56,16 @@ const orderSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    packageDeliveryTime: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    packageDeliveryTimeUnit: {
+      type: String,
+      default: "",
+      trim: true,
+    },
     categoryName: {
       type: String,
       default: "",

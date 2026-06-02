@@ -22,13 +22,23 @@ const router = express.Router();
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 5 * 1024 * 1024,
-    files: 4,
+    fileSize: 100 * 1024 * 1024,
+    files: 6,
+  },
+  fileFilter: (_req, file, cb) => {
+    if (file.fieldname === "images" && file.mimetype.startsWith("image/")) return cb(null, true);
+    if (file.fieldname === "videos" && file.mimetype.startsWith("video/")) return cb(null, true);
+    return cb(new Error("Only image and video uploads are supported for gig media."));
   },
 });
 
-router.post("/", requireAuth, upload.array("images", 4), createGig);
-router.put("/:id", requireAuth, upload.array("images", 4), updateGig);
+const gigMediaUpload = upload.fields([
+  { name: "images", maxCount: 4 },
+  { name: "videos", maxCount: 2 },
+]);
+
+router.post("/", requireAuth, gigMediaUpload, createGig);
+router.put("/:id", requireAuth, gigMediaUpload, updateGig);
 router.delete("/:id", requireAuth, deleteGig);
 router.delete("/requests/:id", requireAuth, deleteGigRequest);
 router.get("/mine", requireAuth, listMyGigs);

@@ -77,6 +77,7 @@ const buildSavedServiceCard = (gigDoc) => {
     categoryName: gigDoc.categoryName || "",
     categorySlug: gigDoc.categorySlug || "",
     images: Array.isArray(gigDoc.images) ? gigDoc.images : [],
+    videos: Array.isArray(gigDoc.videos) ? gigDoc.videos : [],
     baseCity: gigDoc.baseCity || "",
     startingPrice,
     avgPackagePrice,
@@ -231,6 +232,7 @@ const getPublicProviderProfile = async (req, res, next) => {
         categorySlug: gig.categorySlug || "",
         expertType: gig.expertType === "team" ? "team" : "solo",
         images: Array.isArray(gig.images) ? gig.images : [],
+        videos: Array.isArray(gig.videos) ? gig.videos : [],
         startingPrice,
         avgPackagePrice,
         provider: {
@@ -583,6 +585,7 @@ const getAdminProviderDetails = async (req, res, next) => {
         categorySlug: gig.categorySlug || "",
         status: gig.status || "",
         images: Array.isArray(gig.images) ? gig.images : [],
+        videos: Array.isArray(gig.videos) ? gig.videos : [],
         startingPrice: validPrices.length ? Number(Math.min(...validPrices).toFixed(2)) : 0,
         avgPackagePrice: validPrices.length
           ? Number((validPrices.reduce((sum, price) => sum + price, 0) / validPrices.length).toFixed(2))

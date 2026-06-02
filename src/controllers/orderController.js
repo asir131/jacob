@@ -1516,6 +1516,8 @@ const createOrder = async (req, res, next) => {
       providerId: gig.providerId,
       packageName: String(packageName).trim(),
       packageTitle: String(selectedGigPackage?.title || packageTitle || packageName).trim(),
+      packageDeliveryTime: String(selectedGigPackage?.deliveryTime || "").trim(),
+      packageDeliveryTimeUnit: String(selectedGigPackage?.deliveryTimeUnit || "Days").trim(),
       categoryName: String(gig.categoryName || "").trim(),
       scheduledDate: new Date(scheduledDate),
       scheduledTime: String(scheduledTime).trim(),

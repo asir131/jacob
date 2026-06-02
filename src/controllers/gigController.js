@@ -11,7 +11,9 @@ const { emitToRole, emitToUser } = require("../socket");
 
 const DEFAULT_CATEGORY_ICON = "ShieldCheck";
 const DEFAULT_PACKAGE_NAMES = ["Basic", "Standard", "Premium"];
+const DELIVERY_TIME_UNITS = ["Hours", "Days", "Weeks"];
 const MAX_GIG_IMAGES = 4;
+const MAX_GIG_VIDEOS = 2;
 const ADMIN_FEE_RATE = 0.15;
 
 const isCustomCategorySlug = (categorySlug = "", customCategoryName = "") => {
@@ -38,11 +40,15 @@ const buildCustomCategoryPayload = ({ customCategoryName, customCategoryDescript
 const normalizePackages = (packages = []) => {
   return DEFAULT_PACKAGE_NAMES.map((name, index) => {
     const item = Array.isArray(packages) ? packages[index] || {} : {};
+    const deliveryTimeUnit = DELIVERY_TIME_UNITS.includes(String(item.deliveryTimeUnit || "").trim())
+      ? String(item.deliveryTimeUnit).trim()
+      : "Days";
     return {
       name,
       title: String(item.title || "").trim(),
       description: String(item.description || "").trim(),
       deliveryTime: String(item.deliveryTime || "").trim(),
+      deliveryTimeUnit,
       price: Number(item.price) || 0,
     };
   });
@@ -57,12 +63,17 @@ const normalizeImages = (images = []) => {
   return images.filter((image) => typeof image === "string" && image.trim()).slice(0, 4);
 };
 
-const uploadBufferToCloudinary = (buffer, folder) => {
+const normalizeVideos = (videos = []) => {
+  if (!Array.isArray(videos)) return [];
+  return videos.filter((video) => typeof video === "string" && video.trim()).slice(0, MAX_GIG_VIDEOS);
+};
+
+const uploadBufferToCloudinary = (buffer, folder, resourceType = "image") => {
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
       {
         folder,
-        resource_type: "image",
+        resource_type: resourceType,
       },
       (error, result) => {
         if (error) return reject(error);
@@ -74,11 +85,27 @@ const uploadBufferToCloudinary = (buffer, folder) => {
   });
 };
 
+const getUploadedFiles = (req, fieldName) => {
+  if (Array.isArray(req.files)) return fieldName === "images" ? req.files : [];
+  return Array.isArray(req.files?.[fieldName]) ? req.files[fieldName] : [];
+};
+
 const uploadGigImages = async (files = []) => {
   if (!Array.isArray(files) || files.length === 0) return [];
   const limitedFiles = files.slice(0, MAX_GIG_IMAGES);
   const uploads = await Promise.all(
     limitedFiles.map((file) => uploadBufferToCloudinary(file.buffer, "jacob/gig-images"))
+  );
+  return uploads
+    .map((result) => result?.secure_url)
+    .filter((url) => typeof url === "string" && url.trim());
+};
+
+const uploadGigVideos = async (files = []) => {
+  if (!Array.isArray(files) || files.length === 0) return [];
+  const limitedFiles = files.slice(0, MAX_GIG_VIDEOS);
+  const uploads = await Promise.all(
+    limitedFiles.map((file) => uploadBufferToCloudinary(file.buffer, "jacob/gig-videos", "video"))
   );
   return uploads
     .map((result) => result?.secure_url)
@@ -107,6 +134,7 @@ const parseGigRequestBody = (req) => {
     : Number(req.body.travelRadiusKm);
   const packages = parseJsonField(req.body.packages, []);
   const images = normalizeImages(parseJsonField(req.body.images, []));
+  const videos = normalizeVideos(parseJsonField(req.body.videos, []));
 
   return {
     title,
@@ -124,6 +152,7 @@ const parseGigRequestBody = (req) => {
     travelRadiusKm,
     packages,
     images,
+    videos,
   };
 };
 
@@ -161,11 +190,14 @@ const createGig = async (req, res, next) => {
       travelRadiusKm,
       packages,
       images: parsedImages,
+      videos: parsedVideos,
     } = parseGigRequestBody(req);
-    const uploadedImages = await uploadGigImages(req.files || []);
+    const uploadedImages = await uploadGigImages(getUploadedFiles(req, "images"));
+    const uploadedVideos = await uploadGigVideos(getUploadedFiles(req, "videos"));
     const images = normalizeImages(
       parsedImages.concat(uploadedImages)
     );
+    const videos = normalizeVideos(parsedVideos.concat(uploadedVideos));
 
     if (!title || !categorySlug || !categoryName) {
       return res.status(400).json({
@@ -212,6 +244,7 @@ const createGig = async (req, res, next) => {
         requirements,
         packages: normalizePackages(packages),
         images,
+        videos,
         baseCity: String(baseCity || "").trim(),
         locationLat: typeof locationLat === "number" ? locationLat : null,
         locationLng: typeof locationLng === "number" ? locationLng : null,
@@ -273,6 +306,7 @@ const createGig = async (req, res, next) => {
       expertType,
       packages: normalizePackages(packages),
       images,
+      videos,
       baseCity: String(baseCity || "").trim(),
       locationLat: typeof locationLat === "number" ? locationLat : null,
       locationLng: typeof locationLng === "number" ? locationLng : null,
@@ -337,9 +371,12 @@ const updateGig = async (req, res, next) => {
       travelRadiusKm,
       packages,
       images: parsedImages,
+      videos: parsedVideos,
     } = parseGigRequestBody(req);
-    const uploadedImages = await uploadGigImages(req.files || []);
+    const uploadedImages = await uploadGigImages(getUploadedFiles(req, "images"));
+    const uploadedVideos = await uploadGigVideos(getUploadedFiles(req, "videos"));
     const images = normalizeImages(parsedImages.concat(uploadedImages));
+    const videos = normalizeVideos(parsedVideos.concat(uploadedVideos));
 
     if (!title || !categorySlug || !categoryName) {
       return res.status(400).json({
@@ -400,6 +437,7 @@ const updateGig = async (req, res, next) => {
         gigRequest.expertType = expertType;
         gigRequest.packages = normalizedPackages;
         gigRequest.images = images;
+        gigRequest.videos = videos;
         gigRequest.baseCity = baseCity;
         gigRequest.locationLat = typeof locationLat === "number" ? locationLat : null;
         gigRequest.locationLng = typeof locationLng === "number" ? locationLng : null;
@@ -465,6 +503,7 @@ const updateGig = async (req, res, next) => {
       gig.expertType = expertType;
       gig.packages = normalizedPackages;
       gig.images = images;
+      gig.videos = videos;
       gig.baseCity = baseCity;
       gig.locationLat = typeof locationLat === "number" ? locationLat : null;
       gig.locationLng = typeof locationLng === "number" ? locationLng : null;
@@ -495,6 +534,7 @@ const updateGig = async (req, res, next) => {
     gig.expertType = expertType;
     gig.packages = normalizedPackages;
     gig.images = images;
+    gig.videos = videos;
     gig.baseCity = baseCity;
     gig.locationLat = typeof locationLat === "number" ? locationLat : null;
     gig.locationLng = typeof locationLng === "number" ? locationLng : null;
@@ -528,6 +568,7 @@ const updateGig = async (req, res, next) => {
       gigRequest.expertType = expertType;
       gigRequest.packages = normalizedPackages;
       gigRequest.images = images;
+      gigRequest.videos = videos;
       gigRequest.baseCity = baseCity;
       gigRequest.locationLat = typeof locationLat === "number" ? locationLat : null;
       gigRequest.locationLng = typeof locationLng === "number" ? locationLng : null;
@@ -747,6 +788,7 @@ const approveGigRequest = async (req, res, next) => {
       gig.expertType = gigRequest.expertType || "solo";
       gig.packages = gigRequest.packages || [];
       gig.images = gigRequest.images || [];
+      gig.videos = gigRequest.videos || [];
       gig.baseCity = gigRequest.baseCity || "";
       gig.locationLat = typeof gigRequest.locationLat === "number" ? gigRequest.locationLat : null;
       gig.locationLng = typeof gigRequest.locationLng === "number" ? gigRequest.locationLng : null;
@@ -770,6 +812,7 @@ const approveGigRequest = async (req, res, next) => {
         expertType: gigRequest.expertType || "solo",
         packages: gigRequest.packages || [],
         images: gigRequest.images || [],
+        videos: gigRequest.videos || [],
         baseCity: gigRequest.baseCity || "",
         locationLat: typeof gigRequest.locationLat === "number" ? gigRequest.locationLat : null,
         locationLng: typeof gigRequest.locationLng === "number" ? gigRequest.locationLng : null,
@@ -1016,6 +1059,7 @@ const listPublicServices = async (req, res, next) => {
           categoryName: gig.categoryName || "",
           expertType: gig.expertType === "team" ? "team" : "solo",
           image: Array.isArray(gig.images) && gig.images[0] ? gig.images[0] : "",
+          videos: Array.isArray(gig.videos) ? gig.videos : [],
           baseCity: resolvedBaseCity,
           zipCode: itemZipCode,
           avgPackagePrice,
@@ -1247,6 +1291,7 @@ const getPublicServiceById = async (req, res, next) => {
         description: gig.description || "",
         requirements: gig.requirements || "",
         images: Array.isArray(gig.images) ? gig.images : [],
+        videos: Array.isArray(gig.videos) ? gig.videos : [],
         baseCity: resolvedBaseCity,
         zipCode,
         locationLat: typeof gig.locationLat === "number" ? gig.locationLat : null,
@@ -1258,6 +1303,7 @@ const getPublicServiceById = async (req, res, next) => {
           title: item?.title || "",
           description: item?.description || "",
           deliveryTime: item?.deliveryTime || "",
+          deliveryTimeUnit: item?.deliveryTimeUnit || "Days",
           price: calculateClientPrice(item?.price),
         })),
         provider: {
