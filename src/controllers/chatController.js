@@ -261,6 +261,9 @@ const persistConversationMessage = async ({
           : "";
   conversation.lastMessage = lastMessage;
   conversation.lastMessageAt = new Date();
+  conversation.deletedFor = (conversation.deletedFor || []).filter(
+    (id) => ![String(senderId), String(receiverId)].includes(String(id))
+  );
   await conversation.save({ validateBeforeSave: false });
 
   const hydrated = await Message.findById(message._id)
@@ -283,6 +286,7 @@ const getConversations = async (req, res, next) => {
 
     const conversations = await Conversation.find({
       participants: req.user.id,
+      deletedFor: { $ne: req.user.id },
     })
       .populate("participants", "_id firstName lastName email avatar role")
       .populate("gigId", "_id title categoryName")
@@ -346,6 +350,52 @@ const ensureConversationByOrder = async (req, res, next) => {
       success: true,
       message: "Conversation prepared successfully.",
       data: normalizeConversation(hydrated, req.user.id),
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const deleteConversationsFromInbox = async (req, res, next) => {
+  try {
+    if (!req.user?.id) {
+      return res.status(401).json({ success: false, message: "Unauthorized." });
+    }
+
+    const ids = Array.isArray(req.body?.conversationIds) ? req.body.conversationIds : [];
+    const uniqueIds = [...new Set(ids.map((id) => String(id || "").trim()).filter(Boolean))];
+    if (!uniqueIds.length) {
+      return res.status(400).json({ success: false, message: "Select at least one conversation." });
+    }
+
+    const invalidIds = uniqueIds.filter((id) => !mongoose.Types.ObjectId.isValid(id));
+    if (invalidIds.length) {
+      return res.status(400).json({ success: false, message: "Invalid conversation id." });
+    }
+
+    const result = await Conversation.updateMany(
+      {
+        _id: { $in: uniqueIds },
+        participants: req.user.id,
+        deletedFor: { $ne: req.user.id },
+      },
+      {
+        $addToSet: {
+          deletedFor: req.user.id,
+        },
+      }
+    );
+
+    uniqueIds.forEach((conversationId) => {
+      emitToUser(String(req.user.id), "chat:conversation:deleted", { conversationId });
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Selected conversations deleted from inbox.",
+      data: {
+        modifiedCount: Number(result?.modifiedCount || 0),
+      },
     });
   } catch (error) {
     return next(error);
@@ -647,7 +697,7 @@ const createCustomOrderProposal = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "Invalid conversation id." });
     }
 
-    const conversation = await Conversation.findById(conversationId).select("_id participants orderId blockedBy serviceRequestId");
+    const conversation = await Conversation.findById(conversationId).select("_id participants orderId blockedBy serviceRequestId deletedFor");
     if (!conversation) {
       return res.status(404).json({ success: false, message: "Conversation not found." });
     }
@@ -844,7 +894,7 @@ const respondToCustomOrderProposal = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "This custom order request is already handled." });
     }
 
-    const conversation = await Conversation.findById(proposal.conversationId).select("_id participants orderId serviceRequestId");
+    const conversation = await Conversation.findById(proposal.conversationId).select("_id participants orderId serviceRequestId deletedFor");
     if (!conversation) {
       return res.status(404).json({ success: false, message: "Conversation not found." });
     }
@@ -1124,7 +1174,7 @@ const sendMessage = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "Message text or attachments are required." });
     }
 
-    const conversation = await Conversation.findById(conversationId).select("_id participants orderId blockedBy");
+    const conversation = await Conversation.findById(conversationId).select("_id participants orderId blockedBy deletedFor");
     if (!conversation) {
       return res.status(404).json({ success: false, message: "Conversation not found." });
     }
@@ -1157,7 +1207,10 @@ const sendMessage = async (req, res, next) => {
     const messagePreview = previewSource.length > 120 ? `${previewSource.slice(0, 117)}...` : previewSource;
     const orderId = conversation.orderId ? String(conversation.orderId) : "";
     const conversationIdStr = String(conversation._id);
-    const targetPath = orderId
+    const receiverUser = await User.findById(receiverId).select("_id role").lean();
+    const targetPath = receiverUser?.role === "superAdmin"
+      ? "/support"
+      : orderId
       ? `/messages?conversationId=${conversationIdStr}&orderId=${orderId}`
       : `/messages?conversationId=${conversationIdStr}`;
 
@@ -1478,6 +1531,7 @@ module.exports = {
   markConversationMessagesAsRead,
   markAllProviderMessagesAsRead,
   clearConversationHistory,
+  deleteConversationsFromInbox,
   blockConversationUser,
   unblockConversationUser,
 };

@@ -33,6 +33,13 @@ const conversationSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    deletedFor: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        index: true,
+      },
+    ],
     lastMessage: {
       type: String,
       default: "",

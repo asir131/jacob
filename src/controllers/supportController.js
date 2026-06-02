@@ -3,7 +3,7 @@ const SupportMessage = require("../models/SupportMessage");
 const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
 const User = require("../models/User");
-const { emitToRole } = require("../socket");
+const { emitToRole, emitToUser } = require("../socket");
 
 const normalizeSupportMessage = (item) => ({
   id: String(item._id),
@@ -61,6 +61,16 @@ const normalizeChatMessage = (message) => ({
   createdAt: message.createdAt,
   readAt: message.readAt || null,
 });
+
+const emitConversationUpdated = (userId, conversation, lastMessage = "") => {
+  if (!userId || !conversation?._id) return;
+  emitToUser(String(userId), "chat:conversation:updated", {
+    conversationId: String(conversation._id),
+    lastMessage: lastMessage || conversation.lastMessage || "",
+    lastMessageAt: conversation.lastMessageAt || conversation.updatedAt || conversation.createdAt || new Date(),
+    blockedBy: conversation.blockedBy || null,
+  });
+};
 
 const hydrateConversation = (conversationId) =>
   Conversation.findById(conversationId)
@@ -222,8 +232,16 @@ const startSupportConversation = async (req, res, next) => {
         lastMessage: "",
         lastMessageAt: null,
       });
+
+      emitToUser(String(supportUser._id), "chat:created", {
+        conversationId: String(conversation._id),
+      });
+      emitToUser(String(adminId), "chat:created", {
+        conversationId: String(conversation._id),
+      });
     }
 
+    let createdTicketMessage = null;
     if (!supportMessage.conversationId) {
       const ticketText = [
         `Support ticket: ${supportMessage.subject}`,
@@ -239,7 +257,7 @@ const startSupportConversation = async (req, res, next) => {
       }).select("_id");
 
       if (!existingTicketMessage) {
-        await Message.create({
+        createdTicketMessage = await Message.create({
           conversationId: conversation._id,
           orderId: null,
           senderId: adminId,
@@ -253,10 +271,37 @@ const startSupportConversation = async (req, res, next) => {
         await conversation.save({ validateBeforeSave: false });
       }
 
+      conversation.deletedFor = (conversation.deletedFor || []).filter(
+        (id) => ![String(adminId), String(supportUser._id)].includes(String(id))
+      );
+      await conversation.save({ validateBeforeSave: false });
       supportMessage.conversationId = conversation._id;
     }
 
     await supportMessage.save({ validateBeforeSave: false });
+
+    if (createdTicketMessage) {
+      const normalizedTicketMessage = normalizeChatMessage(createdTicketMessage);
+      const conversationIdStr = String(conversation._id);
+      emitToUser(String(supportUser._id), "chat:message:new", normalizedTicketMessage);
+      emitToUser(String(adminId), "chat:message:new", normalizedTicketMessage);
+      emitToUser(String(supportUser._id), "notification:new", {
+        id: `NTF-${Date.now()}`,
+        type: "message",
+        title: "Support opened your ticket",
+        description: supportMessage.subject || "The admin team opened a support conversation.",
+        unread: true,
+        createdAt: new Date().toISOString(),
+        data: {
+          notificationType: "chat_message",
+          conversationId: conversationIdStr,
+          senderId: String(adminId),
+          targetPath: `/messages?conversationId=${conversationIdStr}`,
+        },
+      });
+    }
+    emitConversationUpdated(String(supportUser._id), conversation, conversation.lastMessage);
+    emitConversationUpdated(String(adminId), conversation, conversation.lastMessage);
 
     const [hydratedConversation, messages] = await Promise.all([
       hydrateConversation(conversation._id),
@@ -327,8 +372,46 @@ const updateSupportMessageStatus = async (req, res, next) => {
   }
 };
 
+const deleteSupportMessages = async (req, res, next) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    const uniqueIds = Array.from(new Set(ids.map((id) => String(id || "").trim()).filter(Boolean)));
+    const invalidIds = uniqueIds.filter((id) => !mongoose.Types.ObjectId.isValid(id));
+
+    if (uniqueIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Select at least one support message to delete.",
+      });
+    }
+
+    if (invalidIds.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "One or more support message ids are invalid.",
+      });
+    }
+
+    const result = await SupportMessage.deleteMany({
+      _id: { $in: uniqueIds },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Support messages deleted successfully.",
+      data: {
+        deletedCount: result.deletedCount || 0,
+        ids: uniqueIds,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 module.exports = {
   createSupportMessage,
+  deleteSupportMessages,
   listSupportMessages,
   startSupportConversation,
   updateSupportMessageStatus,

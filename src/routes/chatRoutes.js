@@ -14,6 +14,7 @@ const {
   markConversationMessagesAsRead,
   markAllProviderMessagesAsRead,
   clearConversationHistory,
+  deleteConversationsFromInbox,
   blockConversationUser,
   unblockConversationUser,
 } = require("../controllers/chatController");
@@ -33,6 +34,7 @@ router.post("/conversations/:conversationId/messages", requireAuth, upload.array
 router.post("/conversations/:conversationId/custom-order-proposals", requireAuth, createCustomOrderProposal);
 router.patch("/custom-order-proposals/:proposalId/respond", requireAuth, respondToCustomOrderProposal);
 router.post("/conversations/:conversationId/read", requireAuth, markConversationMessagesAsRead);
+router.delete("/conversations", requireAuth, deleteConversationsFromInbox);
 router.delete("/conversations/:conversationId/messages", requireAuth, clearConversationHistory);
 router.post("/conversations/:conversationId/block", requireAuth, blockConversationUser);
 router.delete("/conversations/:conversationId/block", requireAuth, unblockConversationUser);

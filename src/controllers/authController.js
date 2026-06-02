@@ -196,17 +196,13 @@ const verifySignupOtp = async (req, res, next) => {
     });
 
     await OtpVerification.deleteOne({ _id: pendingSignup._id });
+    const accessToken = createAccessToken(createdUser);
+    const refreshToken = await createRefreshToken(createdUser);
 
     res.status(201).json({
       success: true,
       message: "Signup confirmed successfully.",
-      data: {
-        id: createdUser._id,
-        firstName: createdUser.firstName,
-        lastName: createdUser.lastName,
-        email: createdUser.email,
-        role: createdUser.role,
-      },
+      data: buildAuthPayload(createdUser, accessToken, refreshToken),
     });
   } catch (error) {
     if (error.code === 11000) {
