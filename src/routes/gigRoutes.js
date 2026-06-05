@@ -19,16 +19,51 @@ const {
 } = require("../controllers/gigController");
 
 const router = express.Router();
+const MAX_GIG_VIDEO_SIZE_BYTES = 100 * 1024 * 1024;
+const ALLOWED_GIG_VIDEO_MIME_TYPES = new Set(["video/mp4", "video/quicktime", "video/webm"]);
+const ALLOWED_GIG_VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".webm"]);
+
+const createUploadError = (message) => {
+  const error = new Error(message);
+  error.statusCode = 400;
+  return error;
+};
+
+const getFileExtension = (filename = "") => {
+  const match = String(filename).toLowerCase().match(/\.[a-z0-9]+$/);
+  return match ? match[0] : "";
+};
+
+const isVideoFilename = (filename = "") => ALLOWED_GIG_VIDEO_EXTENSIONS.has(getFileExtension(filename));
+
+const isAllowedGigVideoFile = (file) => {
+  const mimetype = String(file.mimetype || "").toLowerCase();
+  return (
+    ALLOWED_GIG_VIDEO_MIME_TYPES.has(mimetype) ||
+    isVideoFilename(file.originalname) ||
+    mimetype.includes("mp4") ||
+    mimetype.includes("quicktime") ||
+    mimetype.includes("webm")
+  );
+};
+
+const isAllowedGigImageFile = (file) => {
+  const mimetype = String(file.mimetype || "").toLowerCase();
+  return mimetype.startsWith("image/") && !isAllowedGigVideoFile(file);
+};
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 100 * 1024 * 1024,
+    fileSize: MAX_GIG_VIDEO_SIZE_BYTES,
     files: 6,
   },
   fileFilter: (_req, file, cb) => {
-    if (file.fieldname === "images" && file.mimetype.startsWith("image/")) return cb(null, true);
-    if (file.fieldname === "videos" && file.mimetype.startsWith("video/")) return cb(null, true);
-    return cb(new Error("Only image and video uploads are supported for gig media."));
+    const isGigMediaField = file.fieldname === "images" || file.fieldname === "videos";
+    if (isGigMediaField && (isAllowedGigImageFile(file) || isAllowedGigVideoFile(file))) {
+      return cb(null, true);
+    }
+    return cb(createUploadError("Only images and MP4, MOV, or WebM videos are supported for gig media."));
   },
 });
 
@@ -37,8 +72,24 @@ const gigMediaUpload = upload.fields([
   { name: "videos", maxCount: 2 },
 ]);
 
-router.post("/", requireAuth, gigMediaUpload, createGig);
-router.put("/:id", requireAuth, gigMediaUpload, updateGig);
+const handleGigMediaUpload = (req, res, next) => {
+  gigMediaUpload(req, res, (error) => {
+    if (!error) return next();
+
+    error.statusCode = 400;
+    if (error.code === "LIMIT_FILE_SIZE") {
+      error.message = "Each gig media file must be 100 MB or smaller.";
+    } else if (error.code === "LIMIT_FILE_COUNT") {
+      error.message = "You can upload up to 4 images and 2 videos per gig.";
+    } else if (error.code === "LIMIT_UNEXPECTED_FILE") {
+      error.message = "You can upload up to 4 images and 2 videos per gig.";
+    }
+    return next(error);
+  });
+};
+
+router.post("/", requireAuth, handleGigMediaUpload, createGig);
+router.put("/:id", requireAuth, handleGigMediaUpload, updateGig);
 router.delete("/:id", requireAuth, deleteGig);
 router.delete("/requests/:id", requireAuth, deleteGigRequest);
 router.get("/mine", requireAuth, listMyGigs);

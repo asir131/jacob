@@ -4,6 +4,11 @@ const GigAnalyticsEvent = require("../models/GigAnalyticsEvent");
 const GigRequest = require("../models/GigRequest");
 const Order = require("../models/Order");
 const mongoose = require("mongoose");
+const fs = require("fs/promises");
+const os = require("os");
+const path = require("path");
+const { spawn } = require("child_process");
+const ffmpegPath = require("ffmpeg-static");
 const cloudinary = require("../config/cloudinary");
 const slugify = require("../utils/slugify");
 const extractZipCode = require("../utils/extractZipCode");
@@ -14,6 +19,14 @@ const DEFAULT_PACKAGE_NAMES = ["Basic", "Standard", "Premium"];
 const DELIVERY_TIME_UNITS = ["Hours", "Days", "Weeks"];
 const MAX_GIG_IMAGES = 4;
 const MAX_GIG_VIDEOS = 2;
+const MAX_GIG_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
+const MAX_GIG_VIDEO_SIZE_BYTES = 100 * 1024 * 1024;
+const MAX_GIG_VIDEO_DURATION_SECONDS = 120;
+const CLOUDINARY_RAW_VIDEO_LIMIT_BYTES = 10 * 1024 * 1024;
+const COMPRESSED_VIDEO_TARGET_BYTES = 9 * 1024 * 1024;
+const LOCAL_GIG_VIDEO_UPLOAD_DIR = path.join(__dirname, "..", "..", "uploads", "gig-videos");
+const ALLOWED_GIG_VIDEO_MIME_TYPES = new Set(["video/mp4", "video/quicktime", "video/webm"]);
+const ALLOWED_GIG_VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".webm"]);
 const ADMIN_FEE_RATE = 0.15;
 
 const isCustomCategorySlug = (categorySlug = "", customCategoryName = "") => {
@@ -60,12 +73,125 @@ const calculateClientPrice = (baseAmount) => roundMoney(Number(baseAmount) || 0)
 
 const normalizeImages = (images = []) => {
   if (!Array.isArray(images)) return [];
-  return images.filter((image) => typeof image === "string" && image.trim()).slice(0, 4);
+  return images.filter((image) => typeof image === "string" && image.trim()).slice(0, MAX_GIG_IMAGES);
 };
 
 const normalizeVideos = (videos = []) => {
   if (!Array.isArray(videos)) return [];
   return videos.filter((video) => typeof video === "string" && video.trim()).slice(0, MAX_GIG_VIDEOS);
+};
+
+const normalizeMedia = (media = []) => {
+  if (!Array.isArray(media)) return [];
+
+  const normalized = [];
+  let imageCount = 0;
+  let videoCount = 0;
+
+  media.forEach((item) => {
+    const type = item?.type === "video" ? "video" : item?.type === "image" ? "image" : "";
+    const url = String(item?.url || "").trim();
+    if (!type || !url) return;
+
+    if (type === "image") {
+      if (imageCount >= MAX_GIG_IMAGES) return;
+      imageCount += 1;
+    }
+
+    if (type === "video") {
+      if (videoCount >= MAX_GIG_VIDEOS) return;
+      videoCount += 1;
+    }
+
+    normalized.push({ type, url });
+  });
+
+  return normalized;
+};
+
+const buildMediaFromArrays = (images = [], videos = []) => [
+  ...normalizeImages(images).map((url) => ({ type: "image", url })),
+  ...normalizeVideos(videos).map((url) => ({ type: "video", url })),
+];
+
+const resolveGigMedia = (gig = {}) => {
+  const media = normalizeMedia(gig.media);
+  return media.length ? media : buildMediaFromArrays(gig.images, gig.videos);
+};
+
+const getMediaUrlsByType = (media = [], type) =>
+  normalizeMedia(media)
+    .filter((item) => item.type === type)
+    .map((item) => item.url);
+
+const createValidationError = (message) => {
+  const error = new Error(message);
+  error.statusCode = 400;
+  return error;
+};
+
+const getFileExtension = (filename = "") => {
+  const match = String(filename).toLowerCase().match(/\.[a-z0-9]+$/);
+  return match ? match[0] : "";
+};
+
+const isVideoFilename = (filename = "") => ALLOWED_GIG_VIDEO_EXTENSIONS.has(getFileExtension(filename));
+
+const isLikelyVideoBuffer = (buffer) => {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 12) return false;
+
+  const header = buffer.subarray(0, 16).toString("latin1");
+  if (header.startsWith("\x1A\x45\xDF\xA3")) return true;
+
+  const brand = buffer.subarray(4, 12).toString("latin1").toLowerCase();
+  return brand.startsWith("ftyp");
+};
+
+const isAllowedGigVideoFile = (file) => {
+  const mimetype = String(file?.mimetype || "").toLowerCase();
+  return (
+    ALLOWED_GIG_VIDEO_MIME_TYPES.has(mimetype) ||
+    isVideoFilename(file?.originalname) ||
+    isLikelyVideoBuffer(file?.buffer) ||
+    mimetype.includes("mp4") ||
+    mimetype.includes("quicktime") ||
+    mimetype.includes("webm")
+  );
+};
+
+const isAllowedGigImageFile = (file) => {
+  const mimetype = String(file?.mimetype || "").toLowerCase();
+  return mimetype.startsWith("image/") && !isAllowedGigVideoFile(file);
+};
+
+const validateUploadedGigMedia = ({ imageFiles = [], videoFiles = [], existingImages = [], existingVideos = [] }) => {
+  if (existingImages.length + imageFiles.length > MAX_GIG_IMAGES) {
+    throw createValidationError(`You can upload up to ${MAX_GIG_IMAGES} images per gig.`);
+  }
+
+  if (existingVideos.length + videoFiles.length > MAX_GIG_VIDEOS) {
+    throw createValidationError(`You can upload up to ${MAX_GIG_VIDEOS} videos per gig.`);
+  }
+
+  imageFiles.forEach((file) => {
+    if (!isAllowedGigImageFile(file)) {
+      throw createValidationError("Gig images must be image files.");
+    }
+
+    if (file.size > MAX_GIG_IMAGE_SIZE_BYTES) {
+      throw createValidationError("Each gig image must be 10 MB or smaller.");
+    }
+  });
+
+  videoFiles.forEach((file) => {
+    if (!isAllowedGigVideoFile(file)) {
+      throw createValidationError("Gig videos must be MP4, MOV, or WebM files.");
+    }
+
+    if (file.size > MAX_GIG_VIDEO_SIZE_BYTES) {
+      throw createValidationError("Each gig video must be 100 MB or smaller.");
+    }
+  });
 };
 
 const uploadBufferToCloudinary = (buffer, folder, resourceType = "image") => {
@@ -76,7 +202,10 @@ const uploadBufferToCloudinary = (buffer, folder, resourceType = "image") => {
         resource_type: resourceType,
       },
       (error, result) => {
-        if (error) return reject(error);
+        if (error) {
+          error.message = `Cloudinary ${resourceType} upload failed in ${folder}: ${error.message}`;
+          return reject(error);
+        }
         return resolve(result);
       }
     );
@@ -85,31 +214,220 @@ const uploadBufferToCloudinary = (buffer, folder, resourceType = "image") => {
   });
 };
 
+const runFfmpeg = (args) =>
+  new Promise((resolve, reject) => {
+    const child = spawn(ffmpegPath, args, { windowsHide: true });
+    let stderr = "";
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) return resolve();
+      return reject(new Error(stderr.trim() || `ffmpeg exited with code ${code}`));
+    });
+  });
+
+const compressVideoBuffer = async (buffer, originalname = "gig-video.mp4") => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "jacob-gig-video-"));
+  const inputPath = path.join(tempDir, originalname || "input.mp4");
+  const outputPath = path.join(tempDir, "compressed.mp4");
+
+  try {
+    await fs.writeFile(inputPath, buffer);
+
+    await runFfmpeg([
+      "-y",
+      "-i",
+      inputPath,
+      "-t",
+      String(MAX_GIG_VIDEO_DURATION_SECONDS),
+      "-vf",
+      "scale='min(1280,iw)':-2",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "32",
+      "-maxrate",
+      "900k",
+      "-bufsize",
+      "1800k",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "64k",
+      "-movflags",
+      "+faststart",
+      outputPath,
+    ]);
+
+    const compressed = await fs.readFile(outputPath);
+    return compressed.length < buffer.length ? compressed : buffer;
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+};
+
+const getPublicBaseUrl = (req) => {
+  const configuredUrl = String(process.env.API_PUBLIC_URL || "").trim().replace(/\/$/, "");
+  if (configuredUrl) return configuredUrl;
+  return `${req.protocol}://${req.get("host")}`;
+};
+
+const saveLocalGigVideo = async (buffer, req) => {
+  await fs.mkdir(LOCAL_GIG_VIDEO_UPLOAD_DIR, { recursive: true });
+  const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}.mp4`;
+  const filePath = path.join(LOCAL_GIG_VIDEO_UPLOAD_DIR, filename);
+  await fs.writeFile(filePath, buffer);
+  return `${getPublicBaseUrl(req)}/uploads/gig-videos/${filename}`;
+};
+
+const deleteCloudinaryResource = async (publicId, resourceType) => {
+  if (!publicId) return;
+  try {
+    await cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
+  } catch {
+    // Upload validation should fail even if cleanup cannot complete.
+  }
+};
+
 const getUploadedFiles = (req, fieldName) => {
   if (Array.isArray(req.files)) return fieldName === "images" ? req.files : [];
   return Array.isArray(req.files?.[fieldName]) ? req.files[fieldName] : [];
 };
 
+const getUploadedGigMediaFiles = (req) => {
+  const files = [
+    ...getUploadedFiles(req, "images"),
+    ...getUploadedFiles(req, "videos"),
+  ];
+
+  const seen = new Set();
+  return files.filter((file) => {
+    if (!file) return false;
+    if (!seen.has(file)) {
+      seen.add(file);
+      return true;
+    }
+    return false;
+  });
+};
+
 const uploadGigImages = async (files = []) => {
   if (!Array.isArray(files) || files.length === 0) return [];
   const limitedFiles = files.slice(0, MAX_GIG_IMAGES);
+  const invalidImageFile = limitedFiles.find((file) => !isAllowedGigImageFile(file));
+  if (invalidImageFile) {
+    throw createValidationError("Gig images must be image files.");
+  }
+
   const uploads = await Promise.all(
-    limitedFiles.map((file) => uploadBufferToCloudinary(file.buffer, "jacob/gig-images"))
+    limitedFiles.map((file) => uploadBufferToCloudinary(file.buffer, "jacob/gig-images", "image"))
   );
   return uploads
     .map((result) => result?.secure_url)
     .filter((url) => typeof url === "string" && url.trim());
 };
 
-const uploadGigVideos = async (files = []) => {
+const uploadGigVideos = async (files = [], req) => {
   if (!Array.isArray(files) || files.length === 0) return [];
   const limitedFiles = files.slice(0, MAX_GIG_VIDEOS);
-  const uploads = await Promise.all(
-    limitedFiles.map((file) => uploadBufferToCloudinary(file.buffer, "jacob/gig-videos", "video"))
+  const urls = [];
+
+  for (const file of limitedFiles) {
+    if (!isAllowedGigVideoFile(file)) {
+      throw createValidationError("Gig videos must be MP4, MOV, or WebM files.");
+    }
+
+    let result;
+    try {
+      result = await uploadBufferToCloudinary(file.buffer, "jacob/gig-videos", "video");
+    } catch (error) {
+      const message = String(error?.message || "");
+      if (!message.toLowerCase().includes("format mp4 not allowed")) {
+        throw error;
+      }
+      const rawBuffer =
+        file.buffer.length > COMPRESSED_VIDEO_TARGET_BYTES
+          ? await compressVideoBuffer(file.buffer, file.originalname)
+          : file.buffer;
+      try {
+        if (rawBuffer.length > CLOUDINARY_RAW_VIDEO_LIMIT_BYTES) {
+          throw createValidationError("Cloudinary raw video limit exceeded after compression.");
+        }
+        result = await uploadBufferToCloudinary(rawBuffer, "jacob/gig-videos", "raw");
+      } catch {
+        const localBuffer = rawBuffer.length < file.buffer.length ? rawBuffer : await compressVideoBuffer(file.buffer, file.originalname);
+        const localUrl = await saveLocalGigVideo(localBuffer, req);
+        urls.push(localUrl);
+        continue;
+      }
+    }
+
+    const resourceType = String(result?.resource_type || "").trim();
+    if (resourceType && resourceType !== "video" && resourceType !== "raw") {
+      await deleteCloudinaryResource(result?.public_id, resourceType || "raw");
+      throw createValidationError("Gig videos must be MP4, MOV, or WebM files.");
+    }
+
+    const duration = Number(result?.duration);
+    if (Number.isFinite(duration) && duration > MAX_GIG_VIDEO_DURATION_SECONDS) {
+      await deleteCloudinaryResource(result?.public_id, "video");
+      throw createValidationError("Gig videos must be 2 minutes or shorter.");
+    }
+
+    if (typeof result?.secure_url === "string" && result.secure_url.trim()) {
+      urls.push(result.secure_url);
+    }
+  }
+
+  return urls;
+};
+
+const collectGigMediaFromRequest = async (req, parsedImages = [], parsedVideos = []) => {
+  const mediaFiles = getUploadedGigMediaFiles(req);
+  const imageFiles = mediaFiles.filter(isAllowedGigImageFile);
+  const videoFiles = mediaFiles.filter(isAllowedGigVideoFile);
+  const unsupportedFiles = mediaFiles.filter(
+    (file) => !isAllowedGigImageFile(file) && !isAllowedGigVideoFile(file)
   );
-  return uploads
-    .map((result) => result?.secure_url)
-    .filter((url) => typeof url === "string" && url.trim());
+
+  if (unsupportedFiles.length > 0) {
+    throw createValidationError("Only images and MP4, MOV, or WebM videos are supported for gig media.");
+  }
+
+  console.log(
+    "[gig-media]",
+    mediaFiles.map((file) => ({
+      field: file.fieldname,
+      name: file.originalname,
+      mimetype: file.mimetype,
+      size: file.size,
+      classifiedAs: isAllowedGigVideoFile(file) ? "video" : isAllowedGigImageFile(file) ? "image" : "unsupported",
+    }))
+  );
+
+  validateUploadedGigMedia({
+    imageFiles,
+    videoFiles,
+    existingImages: parsedImages,
+    existingVideos: parsedVideos,
+  });
+
+  const uploadedImages = await uploadGigImages(imageFiles);
+  const uploadedVideos = await uploadGigVideos(videoFiles, req);
+  const images = normalizeImages(parsedImages.concat(uploadedImages));
+  const videos = normalizeVideos(parsedVideos.concat(uploadedVideos));
+
+  return {
+    images,
+    videos,
+    media: buildMediaFromArrays(images, videos),
+  };
 };
 
 const parseGigRequestBody = (req) => {
@@ -192,12 +510,7 @@ const createGig = async (req, res, next) => {
       images: parsedImages,
       videos: parsedVideos,
     } = parseGigRequestBody(req);
-    const uploadedImages = await uploadGigImages(getUploadedFiles(req, "images"));
-    const uploadedVideos = await uploadGigVideos(getUploadedFiles(req, "videos"));
-    const images = normalizeImages(
-      parsedImages.concat(uploadedImages)
-    );
-    const videos = normalizeVideos(parsedVideos.concat(uploadedVideos));
+    const { images, videos, media } = await collectGigMediaFromRequest(req, parsedImages, parsedVideos);
 
     if (!title || !categorySlug || !categoryName) {
       return res.status(400).json({
@@ -245,6 +558,7 @@ const createGig = async (req, res, next) => {
         packages: normalizePackages(packages),
         images,
         videos,
+        media,
         baseCity: String(baseCity || "").trim(),
         locationLat: typeof locationLat === "number" ? locationLat : null,
         locationLng: typeof locationLng === "number" ? locationLng : null,
@@ -307,6 +621,7 @@ const createGig = async (req, res, next) => {
       packages: normalizePackages(packages),
       images,
       videos,
+      media,
       baseCity: String(baseCity || "").trim(),
       locationLat: typeof locationLat === "number" ? locationLat : null,
       locationLng: typeof locationLng === "number" ? locationLng : null,
@@ -373,10 +688,7 @@ const updateGig = async (req, res, next) => {
       images: parsedImages,
       videos: parsedVideos,
     } = parseGigRequestBody(req);
-    const uploadedImages = await uploadGigImages(getUploadedFiles(req, "images"));
-    const uploadedVideos = await uploadGigVideos(getUploadedFiles(req, "videos"));
-    const images = normalizeImages(parsedImages.concat(uploadedImages));
-    const videos = normalizeVideos(parsedVideos.concat(uploadedVideos));
+    const { images, videos, media } = await collectGigMediaFromRequest(req, parsedImages, parsedVideos);
 
     if (!title || !categorySlug || !categoryName) {
       return res.status(400).json({
@@ -438,6 +750,7 @@ const updateGig = async (req, res, next) => {
         gigRequest.packages = normalizedPackages;
         gigRequest.images = images;
         gigRequest.videos = videos;
+        gigRequest.media = media;
         gigRequest.baseCity = baseCity;
         gigRequest.locationLat = typeof locationLat === "number" ? locationLat : null;
         gigRequest.locationLng = typeof locationLng === "number" ? locationLng : null;
@@ -504,6 +817,7 @@ const updateGig = async (req, res, next) => {
       gig.packages = normalizedPackages;
       gig.images = images;
       gig.videos = videos;
+      gig.media = media;
       gig.baseCity = baseCity;
       gig.locationLat = typeof locationLat === "number" ? locationLat : null;
       gig.locationLng = typeof locationLng === "number" ? locationLng : null;
@@ -535,6 +849,7 @@ const updateGig = async (req, res, next) => {
     gig.packages = normalizedPackages;
     gig.images = images;
     gig.videos = videos;
+    gig.media = media;
     gig.baseCity = baseCity;
     gig.locationLat = typeof locationLat === "number" ? locationLat : null;
     gig.locationLng = typeof locationLng === "number" ? locationLng : null;
@@ -569,6 +884,7 @@ const updateGig = async (req, res, next) => {
       gigRequest.packages = normalizedPackages;
       gigRequest.images = images;
       gigRequest.videos = videos;
+      gigRequest.media = media;
       gigRequest.baseCity = baseCity;
       gigRequest.locationLat = typeof locationLat === "number" ? locationLat : null;
       gigRequest.locationLng = typeof locationLng === "number" ? locationLng : null;
@@ -775,6 +1091,9 @@ const approveGigRequest = async (req, res, next) => {
     );
 
     let gig = gigRequest.gigRef ? await Gig.findById(gigRequest.gigRef) : null;
+    const media = resolveGigMedia(gigRequest);
+    const images = getMediaUrlsByType(media, "image");
+    const videos = getMediaUrlsByType(media, "video");
     if (gig) {
       gig.providerId = gigRequest.providerId;
       gig.title = gigRequest.title;
@@ -787,8 +1106,9 @@ const approveGigRequest = async (req, res, next) => {
       gig.requirements = gigRequest.requirements;
       gig.expertType = gigRequest.expertType || "solo";
       gig.packages = gigRequest.packages || [];
-      gig.images = gigRequest.images || [];
-      gig.videos = gigRequest.videos || [];
+      gig.images = images;
+      gig.videos = videos;
+      gig.media = media;
       gig.baseCity = gigRequest.baseCity || "";
       gig.locationLat = typeof gigRequest.locationLat === "number" ? gigRequest.locationLat : null;
       gig.locationLng = typeof gigRequest.locationLng === "number" ? gigRequest.locationLng : null;
@@ -811,8 +1131,9 @@ const approveGigRequest = async (req, res, next) => {
         requirements: gigRequest.requirements,
         expertType: gigRequest.expertType || "solo",
         packages: gigRequest.packages || [],
-        images: gigRequest.images || [],
-        videos: gigRequest.videos || [],
+        images,
+        videos,
+        media,
         baseCity: gigRequest.baseCity || "",
         locationLat: typeof gigRequest.locationLat === "number" ? gigRequest.locationLat : null,
         locationLng: typeof gigRequest.locationLng === "number" ? gigRequest.locationLng : null,
@@ -827,6 +1148,7 @@ const approveGigRequest = async (req, res, next) => {
     gigRequest.status = "published";
     gigRequest.categoryRef = category._id;
     gigRequest.gigRef = gig._id;
+    gigRequest.media = media;
     gigRequest.reviewedBy = req.user.id;
     gigRequest.reviewedAt = new Date();
     gigRequest.rejectionReason = "";
@@ -1051,6 +1373,9 @@ const listPublicServices = async (req, res, next) => {
           String(provider.serviceCity || "").trim() ||
           String(provider.address || "").trim();
         const itemZipCode = extractZipCode(resolvedBaseCity);
+        const media = resolveGigMedia(gig);
+        const images = getMediaUrlsByType(media, "image");
+        const videos = getMediaUrlsByType(media, "video");
 
         return {
           id: gig._id,
@@ -1058,8 +1383,10 @@ const listPublicServices = async (req, res, next) => {
           categorySlug: gig.categorySlug || "",
           categoryName: gig.categoryName || "",
           expertType: gig.expertType === "team" ? "team" : "solo",
-          image: Array.isArray(gig.images) && gig.images[0] ? gig.images[0] : "",
-          videos: Array.isArray(gig.videos) ? gig.videos : [],
+          image: images[0] || "",
+          images,
+          videos,
+          media,
           baseCity: resolvedBaseCity,
           zipCode: itemZipCode,
           avgPackagePrice,
@@ -1278,6 +1605,9 @@ const getPublicServiceById = async (req, res, next) => {
         },
       };
     });
+    const media = resolveGigMedia(gig);
+    const images = getMediaUrlsByType(media, "image");
+    const videos = getMediaUrlsByType(media, "video");
 
     return res.status(200).json({
       success: true,
@@ -1290,8 +1620,9 @@ const getPublicServiceById = async (req, res, next) => {
         expertType: gig.expertType === "team" ? "team" : "solo",
         description: gig.description || "",
         requirements: gig.requirements || "",
-        images: Array.isArray(gig.images) ? gig.images : [],
-        videos: Array.isArray(gig.videos) ? gig.videos : [],
+        images,
+        videos,
+        media,
         baseCity: resolvedBaseCity,
         zipCode,
         locationLat: typeof gig.locationLat === "number" ? gig.locationLat : null,

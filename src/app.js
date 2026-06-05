@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const path = require("path");
 const authRoutes = require("./routes/authRoutes");
 const notificationRoutes = require("./routes/notificationRoutes");
 const categoryRoutes = require("./routes/categoryRoutes");
@@ -30,6 +31,7 @@ app.use(
 
 app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), handleStripeWebhook);
 app.use(express.json());
+app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 
 app.get("/api/health", (req, res) => {
   res.status(200).json({

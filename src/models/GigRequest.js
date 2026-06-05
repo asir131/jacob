@@ -105,6 +105,20 @@ const gigRequestSchema = new mongoose.Schema(
         default: "",
       },
     ],
+    media: [
+      {
+        type: {
+          type: String,
+          enum: ["image", "video"],
+          required: true,
+        },
+        url: {
+          type: String,
+          required: true,
+          trim: true,
+        },
+      },
+    ],
     baseCity: {
       type: String,
       default: "",
