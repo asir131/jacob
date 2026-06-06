@@ -87,6 +87,107 @@ const parsePage = (value, fallback) => {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 };
 
+const ORDER_SORT_TIMEZONE = process.env.ORDER_REMINDER_TIMEZONE || process.env.APP_TIMEZONE || "Asia/Dhaka";
+const UPCOMING_PROVIDER_ORDER_STATUSES = new Set([
+  "pending",
+  "accepted",
+  "accepting_delivery",
+  "revision_requested",
+  "under_revision",
+  "after_sell_revision_requested",
+  "under_after_sell_revision",
+]);
+
+const getDateKeyInTimeZone = (value, timeZone = ORDER_SORT_TIMEZONE) => {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+
+  const getPart = (type) => parts.find((part) => part.type === type)?.value || "";
+  const year = getPart("year");
+  const month = getPart("month");
+  const day = getPart("day");
+  return year && month && day ? `${year}-${month}-${day}` : "";
+};
+
+const parseScheduledTime = (scheduledTime = "") => {
+  const value = String(scheduledTime || "").trim().toUpperCase();
+  if (!value) return null;
+
+  const amPmMatch = value.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/);
+  if (amPmMatch) {
+    let hours = Number(amPmMatch[1]);
+    const minutes = Number(amPmMatch[2]);
+    const period = amPmMatch[3];
+    if (!Number.isFinite(hours) || !Number.isFinite(minutes) || hours < 1 || hours > 12 || minutes < 0 || minutes > 59) {
+      return null;
+    }
+    if (period === "AM" && hours === 12) hours = 0;
+    if (period === "PM" && hours !== 12) hours += 12;
+    return { hours, minutes };
+  }
+
+  const twentyFourHourMatch = value.match(/^(\d{1,2}):(\d{2})$/);
+  if (twentyFourHourMatch) {
+    const hours = Number(twentyFourHourMatch[1]);
+    const minutes = Number(twentyFourHourMatch[2]);
+    if (!Number.isFinite(hours) || !Number.isFinite(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+      return null;
+    }
+    return { hours, minutes };
+  }
+
+  return null;
+};
+
+const buildScheduledDateTime = (scheduledDate, scheduledTime) => {
+  const dateKey = getDateKeyInTimeZone(scheduledDate);
+  const parsedTime = parseScheduledTime(scheduledTime);
+  if (!dateKey || !parsedTime) return null;
+
+  const [year, month, day] = dateKey.split("-").map((part) => Number(part));
+  if (![year, month, day].every(Number.isFinite)) return null;
+
+  return new Date(year, month - 1, day, parsedTime.hours, parsedTime.minutes, 0, 0);
+};
+
+const getProviderOrderScheduleSort = (order, nowMs = Date.now()) => {
+  const scheduledAt = buildScheduledDateTime(order?.scheduledDate, order?.scheduledTime);
+  const scheduledMs = scheduledAt?.getTime();
+  const hasValidSchedule = Number.isFinite(scheduledMs);
+  const isUpcoming =
+    hasValidSchedule &&
+    scheduledMs >= nowMs &&
+    UPCOMING_PROVIDER_ORDER_STATUSES.has(String(order?.status || ""));
+
+  return {
+    group: isUpcoming ? 0 : 1,
+    scheduledMs: hasValidSchedule ? scheduledMs : Number.MAX_SAFE_INTEGER,
+    createdMs: new Date(order?.createdAt || 0).getTime() || 0,
+  };
+};
+
+const sortProviderOrdersBySchedule = (orders = []) => {
+  const nowMs = Date.now();
+  return [...orders].sort((a, b) => {
+    const left = getProviderOrderScheduleSort(a, nowMs);
+    const right = getProviderOrderScheduleSort(b, nowMs);
+
+    if (left.group !== right.group) return left.group - right.group;
+    if (left.scheduledMs !== right.scheduledMs) {
+      return left.group === 0 ? left.scheduledMs - right.scheduledMs : right.scheduledMs - left.scheduledMs;
+    }
+    return right.createdMs - left.createdMs;
+  });
+};
+
 const formatAddress = (area = "", district = "", zip = "") =>
   [area || "Area unavailable", district || "District unavailable", zip || "ZIP N/A"].join(", ");
 
@@ -1612,17 +1713,16 @@ const listProviderOrders = async (req, res, next) => {
       ];
     }
 
-    const [orders, totalItems] = await Promise.all([
+    const [allOrders, totalItems] = await Promise.all([
       Order.find(query)
         .populate("gigId", "_id title categoryName images")
         .populate("clientId", "_id firstName lastName email phone address avatar locationLat locationLng")
         .populate("providerId", "_id firstName lastName email phone address avatar")
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
+        .sort({ scheduledDate: 1, createdAt: -1 })
         .lean(),
       Order.countDocuments(query),
     ]);
+    const orders = sortProviderOrdersBySchedule(allOrders).slice(skip, skip + limit);
     const ordersWithRepeatCounts = await attachRepeatCounts(orders);
 
     const totalPages = Math.max(1, Math.ceil(totalItems / limit));

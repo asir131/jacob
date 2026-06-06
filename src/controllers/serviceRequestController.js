@@ -585,7 +585,12 @@ const listProviderServiceRequests = async (req, res, next) => {
           ],
         },
         {
-          "adminInvitations.providerId": req.user.id,
+          adminInvitations: {
+            $elemMatch: {
+              providerId: req.user.id,
+              status: "pending",
+            },
+          },
           linkedOrderId: null,
         },
       ],
@@ -608,6 +613,7 @@ const listProviderServiceRequests = async (req, res, next) => {
       })
       .filter((item) => {
         const invitation = resolveViewerInvitation(item, req.user.id);
+        if (invitation && String(invitation.status || "") !== "pending") return false;
         if (invitation) return true;
         return Number.isFinite(item.distanceKm) && item.distanceKm <= radiusKm;
       })
