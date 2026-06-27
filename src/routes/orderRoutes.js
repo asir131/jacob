@@ -27,6 +27,12 @@ const {
   submitClientOrderReview,
   finalizeClientOrder,
 } = require("../controllers/orderController");
+const {
+  createProviderAvailabilityBlock,
+  deleteProviderAvailabilityBlock,
+  listProviderAvailabilityBlocks,
+  listPublicProviderAvailabilityBlocks,
+} = require("../controllers/providerAvailabilityController");
 
 const router = express.Router();
 const upload = multer({
@@ -35,12 +41,16 @@ const upload = multer({
 });
 
 router.post("/", requireAuth, createOrder);
+router.get("/availability/provider/:providerId", listPublicProviderAvailabilityBlocks);
 router.get("/admin/dashboard", requireAuth, requireAdmin, getAdminDashboard);
 router.get("/admin/orders/:id", requireAuth, requireAdmin, getAdminOrderDetail);
 router.get("/admin/transactions", requireAuth, requireAdmin, getAdminTransactions);
 router.get("/provider/dashboard", requireAuth, getProviderDashboard);
 router.get("/provider/revenue", requireAuth, getProviderRevenueHistory);
 router.get("/provider/ratings", requireAuth, getProviderRatings);
+router.get("/provider/availability-blocks", requireAuth, listProviderAvailabilityBlocks);
+router.post("/provider/availability-blocks", requireAuth, createProviderAvailabilityBlock);
+router.delete("/provider/availability-blocks/:id", requireAuth, deleteProviderAvailabilityBlock);
 router.get("/provider", requireAuth, listProviderOrders);
 router.get("/provider/:id", requireAuth, getProviderOrderDetail);
 router.get("/client/dashboard", requireAuth, getClientDashboard);

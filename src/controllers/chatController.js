@@ -8,6 +8,7 @@ const User = require("../models/User");
 const CustomOrderProposal = require("../models/CustomOrderProposal");
 const ServiceRequest = require("../models/ServiceRequest");
 const { emitToUser, emitToRole } = require("../socket");
+const { findBlockingAvailability } = require("../utils/providerAvailability");
 
 const uploadBufferToCloudinary = (buffer, folder, resourceType = "auto") => {
   return new Promise((resolve, reject) => {
@@ -921,6 +922,21 @@ const respondToCustomOrderProposal = async (req, res, next) => {
       : `Custom order request declined: ${proposal.title}`;
 
     if (action === "accept") {
+      const availabilityBlock = await findBlockingAvailability({
+        providerId: proposal.providerId,
+        scheduledDate: proposal.scheduledDate,
+        scheduledTime: proposal.scheduledTime,
+      });
+      if (availabilityBlock) {
+        return res.status(409).json({
+          success: false,
+          message:
+            availabilityBlock.scope === "full_day"
+              ? "This provider is unavailable on the proposed date. Please ask for another date."
+              : "This provider has blocked the proposed time. Please ask for another time.",
+        });
+      }
+
       const repeatRootOrderId = proposal.repeatRootOrderId || resolveRepeatRootId(sourceOrder);
       const repeatIteration = Number(proposal.repeatIteration) || (sourceOrder?.repeatIteration ? Number(sourceOrder.repeatIteration) + 1 : 2);
       const pricing = calculateOrderPricing(proposal.price);

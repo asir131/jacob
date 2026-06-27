@@ -10,6 +10,7 @@ const ServiceRequest = require("../models/ServiceRequest");
 const { emitToUser } = require("../socket");
 const { ensureConversationForOrder } = require("./chatController");
 const WithdrawalRequest = require("../models/WithdrawalRequest");
+const { findBlockingAvailability, serializeAvailabilityBlock } = require("../utils/providerAvailability");
 
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
 const WEB_APP_URL = process.env.CLIENT_APP_URL || process.env.FRONTEND_URL || "http://localhost:3000";
@@ -1608,6 +1609,22 @@ const createOrder = async (req, res, next) => {
           message: `You are outside this provider's ${(effectiveTravelRadiusKm / 1.60934).toFixed(1)} mile service radius.`,
         });
       }
+    }
+
+    const availabilityBlock = await findBlockingAvailability({
+      providerId: gig.providerId,
+      scheduledDate,
+      scheduledTime,
+    });
+    if (availabilityBlock) {
+      return res.status(409).json({
+        success: false,
+        message:
+          availabilityBlock.scope === "full_day"
+            ? "This provider is unavailable on the selected date. Please choose another day."
+            : "This provider has blocked the selected time. Please choose another time.",
+        data: { availabilityBlock: serializeAvailabilityBlock(availabilityBlock) },
+      });
     }
 
     const orderPayload = {

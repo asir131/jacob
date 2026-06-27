@@ -7,6 +7,7 @@ const User = require("../models/User");
 const { emitToRole, emitToUser } = require("../socket");
 const { ensureConversationForOrder, startServiceRequestNegotiationConversation } = require("./chatController");
 const slugify = require("../utils/slugify");
+const { findBlockingAvailability } = require("../utils/providerAvailability");
 
 const uploadBufferToCloudinary = (buffer, folder) => {
   return new Promise((resolve, reject) => {
@@ -253,6 +254,21 @@ const createOrderFromServiceRequest = async ({ request, providerId }) => {
     "";
 
   const pricing = calculateOrderPricing(request.budget);
+  const availabilityBlock = await findBlockingAvailability({
+    providerId,
+    scheduledDate: request.preferredDate ? new Date(request.preferredDate) : new Date(),
+    scheduledTime: String(request.preferredTime || "").trim(),
+  });
+  if (availabilityBlock) {
+    const error = new Error(
+      availabilityBlock.scope === "full_day"
+        ? "You have blocked this request date on your calendar."
+        : "You have blocked this request time on your calendar."
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+
   const order = await Order.create({
     orderNumber: createOrderNumber(),
     gigId: null,
