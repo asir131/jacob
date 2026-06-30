@@ -3,12 +3,12 @@ const isValidEmail = (email) => {
 };
 
 const validateSignupRequest = (req, res, next) => {
-  const { firstName, lastName, email, password, role } = req.body;
+  const { email, password, role } = req.body;
 
-  if (!firstName || !lastName || !email || !password || !role) {
+  if (!email || !password || !role) {
     return res.status(400).json({
       success: false,
-      message: "All fields are required.",
+      message: "Email, password and role are required.",
     });
   }
 

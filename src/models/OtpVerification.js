@@ -11,12 +11,12 @@ const otpVerificationSchema = new mongoose.Schema(
     },
     firstName: {
       type: String,
-      required: true,
+      default: "",
       trim: true,
     },
     lastName: {
       type: String,
-      required: true,
+      default: "",
       trim: true,
     },
     password: {

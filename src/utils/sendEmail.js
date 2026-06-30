@@ -19,7 +19,7 @@ const sendOtpEmail = async ({ email, firstName, otp }) => {
     from: process.env.SMTP_FROM,
     to: email,
     subject: "Your OTP for signup verification",
-    text: `Hi ${firstName}, your OTP is ${otp}. It will expire in 10 minutes.`,
+    text: `Hi ${firstName || "there"}, your OTP is ${otp}. It will expire in 10 minutes.`,
   });
 };
 

@@ -113,6 +113,8 @@ const signup = async (req, res, next) => {
   try {
     const { firstName, lastName, email, password, role } = req.body;
     const normalizedEmail = email.toLowerCase().trim();
+    const normalizedFirstName = String(firstName || "").trim();
+    const normalizedLastName = String(lastName || "").trim();
 
     const existingUser = await User.findOne({ email: normalizedEmail });
     if (existingUser) {
@@ -129,8 +131,8 @@ const signup = async (req, res, next) => {
     await OtpVerification.findOneAndUpdate(
       { email: normalizedEmail },
       {
-        firstName,
-        lastName,
+        firstName: normalizedFirstName,
+        lastName: normalizedLastName,
         email: normalizedEmail,
         password: hashedPassword,
         role,
@@ -140,7 +142,7 @@ const signup = async (req, res, next) => {
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
-    await sendOtpEmail({ email: normalizedEmail, firstName, otp });
+    await sendOtpEmail({ email: normalizedEmail, firstName: normalizedFirstName, otp });
 
     res.status(200).json({
       success: true,

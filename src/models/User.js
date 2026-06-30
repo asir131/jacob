@@ -4,14 +4,11 @@ const userSchema = new mongoose.Schema(
   {
     firstName: {
       type: String,
-      required: true,
+      default: "",
       trim: true,
     },
     lastName: {
       type: String,
-      required: function () {
-        return !["admin", "superAdmin"].includes(this.role);
-      },
       default: "",
       trim: true,
     },
