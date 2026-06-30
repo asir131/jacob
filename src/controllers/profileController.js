@@ -1,7 +1,17 @@
 const mongoose = require("mongoose");
 const User = require("../models/User");
 const Gig = require("../models/Gig");
+const GigAnalyticsEvent = require("../models/GigAnalyticsEvent");
+const GigRequest = require("../models/GigRequest");
 const Order = require("../models/Order");
+const OtpVerification = require("../models/OtpVerification");
+const PasswordResetOtp = require("../models/PasswordResetOtp");
+const ProviderAvailabilityBlock = require("../models/ProviderAvailabilityBlock");
+const RefreshToken = require("../models/RefreshToken");
+const ServiceRequest = require("../models/ServiceRequest");
+const SupportMessage = require("../models/SupportMessage");
+const WebsiteReview = require("../models/WebsiteReview");
+const WithdrawalRequest = require("../models/WithdrawalRequest");
 const cloudinary = require("../config/cloudinary");
 const bcrypt = require("bcryptjs");
 const { emitToRole, emitToUser, isUserOnline } = require("../socket");
@@ -1508,6 +1518,101 @@ const changePassword = async (req, res, next) => {
   }
 };
 
+const deleteMyAccount = async (req, res, next) => {
+  try {
+    if (!req.user || !["client", "provider"].includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "This account cannot be deleted from profile settings.",
+      });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user || user.deletedAt) {
+      return res.status(404).json({ success: false, message: "User not found." });
+    }
+
+    const [activeOrderCount, pendingWithdrawalCount] = await Promise.all([
+      Order.countDocuments({
+        $or: [{ clientId: user._id }, { providerId: user._id }],
+        status: { $nin: ["completed", "declined"] },
+      }),
+      WithdrawalRequest.countDocuments({
+        providerId: user._id,
+        status: { $in: ["pending", "approved"] },
+      }),
+    ]);
+
+    if (activeOrderCount > 0) {
+      return res.status(409).json({
+        success: false,
+        message: "Finish or decline your active orders before deleting your account.",
+      });
+    }
+
+    if (pendingWithdrawalCount > 0 || Number(user.walletBalance || 0) > 0) {
+      return res.status(409).json({
+        success: false,
+        message: "Complete pending withdrawals and withdraw your remaining balance before deleting your account.",
+      });
+    }
+
+    const originalEmail = user.email;
+    const ownedGigs = await Gig.find({ providerId: user._id }).select("_id").lean();
+    const ownedGigIds = ownedGigs.map((gig) => gig._id);
+
+    await Promise.all([
+      RefreshToken.deleteMany({ userId: user._id }),
+      PasswordResetOtp.deleteMany({ userId: user._id }),
+      OtpVerification.deleteMany({ email: originalEmail }),
+      ProviderAvailabilityBlock.deleteMany({ providerId: user._id }),
+      WebsiteReview.deleteMany({ reviewerId: user._id }),
+      GigAnalyticsEvent.deleteMany({
+        $or: [{ clientId: user._id }, { gigId: { $in: ownedGigIds } }],
+      }),
+      GigRequest.deleteMany({ providerId: user._id }),
+      Gig.deleteMany({ providerId: user._id }),
+      User.updateMany(
+        { savedServiceIds: { $in: ownedGigIds } },
+        { $pull: { savedServiceIds: { $in: ownedGigIds } } }
+      ),
+      ServiceRequest.deleteMany({ clientId: user._id }),
+      SupportMessage.deleteMany({ userId: user._id }),
+    ]);
+
+    user.firstName = "Deleted";
+    user.lastName = "User";
+    user.email = `deleted.${user._id}@deleted.invalid`;
+    user.password = await bcrypt.hash(`${user._id}-${Date.now()}-${Math.random()}`, 10);
+    user.authProvider = "password";
+    user.googleId = "";
+    user.avatar = "";
+    user.phone = "";
+    user.address = "";
+    user.preferredLanguage = "English (US)";
+    user.businessBio = "";
+    user.experienceLevel = "";
+    user.serviceCity = "";
+    user.locationLat = null;
+    user.locationLng = null;
+    user.serviceLocationLat = null;
+    user.serviceLocationLng = null;
+    user.payoutInfo = {};
+    user.payoutVerificationStatus = PAYOUT_STATUS.UNVERIFIED;
+    user.savedServiceIds = [];
+    user.isVerified = false;
+    user.deletedAt = new Date();
+    await user.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Your account has been deleted.",
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 module.exports = {
   getMyProfile,
   getPublicProviderProfile,
@@ -1518,6 +1623,7 @@ module.exports = {
   uploadAvatar,
   updateProfile,
   changePassword,
+  deleteMyAccount,
   createAdminAccount,
   listAdminAccounts,
   updateAdminAccount,

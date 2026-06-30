@@ -20,9 +20,9 @@ const requireAuth = (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     User.findById(decoded.userId)
-      .select("_id role email firstName lastName avatar")
+      .select("_id role email firstName lastName avatar deletedAt")
       .then((user) => {
-        if (!user) {
+        if (!user || user.deletedAt) {
           return res.status(401).json({
             success: false,
             message: "User not found.",

@@ -13,6 +13,7 @@ const {
   uploadAvatar,
   updateProfile,
   changePassword,
+  deleteMyAccount,
   createAdminAccount,
   listAdminAccounts,
   updateAdminAccount,
@@ -49,6 +50,7 @@ router.post("/admin/admins", requireAuth, requireSuperAdmin, createAdminAccount)
 router.patch("/admin/admins/:adminId", requireAuth, requireSuperAdmin, updateAdminAccount);
 router.post("/avatar", requireAuth, upload.single("image"), uploadAvatar);
 router.put("/me", requireAuth, updateProfile);
+router.delete("/me", requireAuth, deleteMyAccount);
 router.post("/change-password", requireAuth, changePassword);
 router.post(
   "/provider/payout-info",

@@ -202,6 +202,11 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    deletedAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
     savedServiceIds: [
       {
         type: mongoose.Schema.Types.ObjectId,
